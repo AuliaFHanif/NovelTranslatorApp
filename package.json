@@ -4,7 +4,7 @@
   "description": "4-phase literary translation processor for Japanese/Chinese novels",
   "private": true,
   "scripts": {
-    "dev": "npm run dev --workspace=backend & npm run dev --workspace=frontend",
+    "dev": "concurrently \"npm run dev --workspace=backend\" \"npm run dev --workspace=frontend\"",
     "backend:dev": "npm run dev --workspace=backend",
     "backend:seed": "npm run --workspace=backend -- seed.js",
     "frontend:dev": "npm run dev --workspace=frontend",
@@ -22,5 +22,8 @@
     "nlp"
   ],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
 }
