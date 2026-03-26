@@ -1,0 +1,26 @@
+{
+  "name": "anatomy-engine",
+  "version": "1.0.0",
+  "description": "4-phase literary translation processor for Japanese/Chinese novels",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev --workspace=backend & npm run dev --workspace=frontend",
+    "backend:dev": "npm run dev --workspace=backend",
+    "backend:seed": "npm run --workspace=backend -- seed.js",
+    "frontend:dev": "npm run dev --workspace=frontend",
+    "frontend:build": "npm run build --workspace=frontend"
+  },
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "keywords": [
+    "translation",
+    "novel",
+    "japanese",
+    "chinese",
+    "nlp"
+  ],
+  "author": "",
+  "license": "ISC"
+}
