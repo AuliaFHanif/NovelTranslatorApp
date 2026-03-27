@@ -8,6 +8,7 @@ import { Navbar } from "./components/layout/Navbar";
 import { Home } from "./pages/Home";
 import { Library } from "./pages/Library";
 import { Create } from "./pages/Create";
+import { SeriesDetail } from "./pages/SeriesDetail";
 import { Translation } from "./pages/Translation";
 import { ContextLibrary } from "./pages/ContextLibrary";
 
@@ -26,6 +27,7 @@ function Layout() {
         <Route path="/" element={<Home />} />
         <Route path="/library" element={<Library />} />
         <Route path="/create" element={<Create />} />
+        <Route path="/series/:id" element={<SeriesDetail />} />
         <Route path="/translation" element={<Translation />} />
         <Route path="/contextLibrary" element={<ContextLibrary />} />
       </Routes>

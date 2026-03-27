@@ -1,8 +1,43 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
+import { getHealthStatus, LLM_PROXY_ENDPOINT } from "../lib/api";
+import { showSuccess, showError } from "../lib/notifications";
 
 export function Translation() {
+  const [apiStatus, setApiStatus] = useState<
+    "idle" | "testing" | "ok" | "error"
+  >("idle");
+
+  async function handleTestConnection() {
+    try {
+      setApiStatus("testing");
+      const health = await getHealthStatus();
+      if (health.status === "ok") {
+        setApiStatus("ok");
+        await showSuccess(
+          "Connection Successful",
+          "API is responding correctly.",
+        );
+      } else {
+        setApiStatus("error");
+        await showError(
+          "Connection Failed",
+          "API responded but with an error status.",
+        );
+      }
+    } catch (err) {
+      setApiStatus("error");
+      await showError(
+        "Connection Failed",
+        err instanceof Error
+          ? err.message
+          : "Unable to reach the API endpoint.",
+      );
+    }
+  }
+
   return (
     <div className="flex flex-col w-full h-[100dvh] pt-20 px-8 pb-0 overflow-hidden">
       <div className="flex flex-col border-b border-[#d8cdbd] pb-3 mb-3 shrink-0">
@@ -247,12 +282,23 @@ export function Translation() {
       <div className="shrink-0 flex items-center justify-between border-y border-[#d8cdbd] py-3 -mx-8 px-8 bg-[#FBF9F6]">
         <div className="flex items-center gap-6 flex-1">
           <div className="flex items-center gap-3">
-            <div className="w-2 h-2 rounded-full bg-[#a0908b]"></div>
+            <div
+              className={`w-2 h-2 rounded-full ${
+                apiStatus === "ok"
+                  ? "bg-[#2f7a46]"
+                  : apiStatus === "error"
+                    ? "bg-[#8b2626]"
+                    : apiStatus === "testing"
+                      ? "bg-[#c8a080]"
+                      : "bg-[#a0908b]"
+              }`}
+            ></div>
             <span className="text-[9px] tracking-[0.2em] font-sans text-[#807068] uppercase">
               API
             </span>
             <Input
-              defaultValue="http://localhost:1234/v1"
+              value={LLM_PROXY_ENDPOINT}
+              readOnly
               className="h-8 w-64 border-[#d8cdbd] bg-white text-xs font-mono text-[#5c504b] focus-visible:ring-[#a0908b] rounded-sm"
             />
           </div>
@@ -272,9 +318,10 @@ export function Translation() {
           </div>
           <Button
             variant="outline"
+            onClick={handleTestConnection}
             className="h-8 text-[9px] tracking-[0.1em] bg-transparent hover:bg-[#f2eadc] border-[#d8cdbd] text-[#807068] font-sans uppercase rounded-sm px-6"
           >
-            TEST
+            {apiStatus === "testing" ? "TESTING..." : "TEST"}
           </Button>
         </div>
 
