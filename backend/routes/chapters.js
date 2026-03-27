@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { Series, Chapter } = require("../models");
+const { Series, Chapter, Act } = require("../models");
 
 /**
  * GET /api/chapters
@@ -98,7 +98,7 @@ router.get("/:id", async (req, res) => {
     const chapter = await Chapter.findByPk(id, {
       include: [
         { model: Series, attributes: ["id", "title", "language"] },
-        { model: "Act", as: "Acts" },
+        { model: Act },
       ],
     });
 

@@ -26,6 +26,13 @@ module.exports = (sequelize, DataTypes) => {
       title: DataTypes.STRING,
       rawText: DataTypes.TEXT,
       finalText: DataTypes.TEXT,
+      translationStatus: DataTypes.ENUM(
+        "idle",
+        "pass1_done",
+        "pass2_done",
+        "pass3_done",
+      ),
+      lastTranslatedAt: DataTypes.DATE,
     },
     {
       sequelize,

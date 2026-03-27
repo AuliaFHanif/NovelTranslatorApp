@@ -11,6 +11,7 @@ import { Create } from "./pages/Create";
 import { SeriesDetail } from "./pages/SeriesDetail";
 import { Translation } from "./pages/Translation";
 import { ContextLibrary } from "./pages/ContextLibrary";
+import { Settings } from "./pages/Settings";
 
 function Layout() {
   const location = useLocation();
@@ -30,6 +31,7 @@ function Layout() {
         <Route path="/series/:id" element={<SeriesDetail />} />
         <Route path="/translation" element={<Translation />} />
         <Route path="/contextLibrary" element={<ContextLibrary />} />
+        <Route path="/settings" element={<Settings />} />
       </Routes>
 
       {!isTranslationRoute && (

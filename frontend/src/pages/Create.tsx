@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "../components/ui/button";
@@ -11,17 +11,43 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../components/ui/select";
-import { createSeries, type SourceLanguage } from "../lib/api";
+import {
+  createSeries,
+  listGenres,
+  type SourceLanguage,
+  type Genre,
+} from "../lib/api";
 import { showSuccess, showError } from "../lib/notifications";
 
 export function Create() {
   const [type, setType] = useState<"series" | "standalone">("series");
   const [title, setTitle] = useState("");
-  const [genre, setGenre] = useState("xianxia");
+  const [genre, setGenre] = useState("");
   const [language, setLanguage] = useState<SourceLanguage>("zh");
   const [description, setDescription] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [genres, setGenres] = useState<Genre[]>([]);
+  const [isLoadingGenres, setIsLoadingGenres] = useState(true);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    async function loadGenres() {
+      try {
+        setIsLoadingGenres(true);
+        const data = await listGenres();
+        setGenres(data);
+        if (data.length > 0 && !genre) {
+          setGenre(data[0].name);
+        }
+      } catch (error) {
+        console.error("Failed to load genres:", error);
+        setGenres([]);
+      } finally {
+        setIsLoadingGenres(false);
+      }
+    }
+    void loadGenres();
+  }, []);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -37,7 +63,7 @@ export function Create() {
       await createSeries({
         title: title.trim(),
         language,
-        genre,
+        genre: genre || undefined,
         description: description.trim() || undefined,
       });
 
@@ -124,16 +150,31 @@ export function Create() {
             <label className="block text-[10px] tracking-[0.2em] text-[#b8a8a0] uppercase font-sans mb-3">
               GENRE
             </label>
-            <Select defaultValue="xianxia" onValueChange={setGenre}>
+            <Select
+              value={genre || ""}
+              onValueChange={setGenre}
+              disabled={isLoadingGenres || genres.length === 0}
+            >
               <SelectTrigger className="w-full border-[#d8cdbd] rounded-sm bg-transparent focus:ring-1 focus:ring-[#8b2626] font-serif text-[#4A3D39] h-12">
-                <SelectValue placeholder="Select genre" />
+                <SelectValue
+                  placeholder={
+                    isLoadingGenres
+                      ? "Loading genres..."
+                      : genres.length === 0
+                        ? "No genres available"
+                        : "Select genre"
+                  }
+                />
               </SelectTrigger>
-              <SelectContent className="bg-[#FBF9F6] border-[#d8cdbd] font-serif">
-                <SelectItem value="xianxia">Xianxia</SelectItem>
-                <SelectItem value="wuxia">Wuxia</SelectItem>
-                <SelectItem value="isekai">Isekai</SelectItem>
-                <SelectItem value="dark-fantasy">Dark Fantasy</SelectItem>
-              </SelectContent>
+              {genres.length > 0 && (
+                <SelectContent className="bg-[#FBF9F6] border-[#d8cdbd] font-serif">
+                  {genres.map((g) => (
+                    <SelectItem key={g.id} value={g.name}>
+                      {g.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              )}
             </Select>
           </div>
           <div>
@@ -175,7 +216,7 @@ export function Create() {
         <div className="flex gap-4 pt-4">
           <Button
             type="submit"
-            disabled={isSubmitting || !title.trim()}
+            disabled={isSubmitting || !title.trim() || !genre}
             className="bg-[#8b2626] text-white font-sans tracking-[0.2em] text-[10px] px-6 rounded-sm uppercase h-10 hover:bg-[#701c1c] disabled:bg-[#e8dfcf] disabled:text-[#a0908b] disabled:hover:bg-[#e8dfcf] disabled:opacity-80 disabled:cursor-not-allowed"
           >
             {isSubmitting

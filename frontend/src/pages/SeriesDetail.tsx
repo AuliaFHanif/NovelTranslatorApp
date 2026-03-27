@@ -282,12 +282,13 @@ export function SeriesDetail() {
           ) : (
             <div className="space-y-2">
               {chapters.map((chapter) => (
-                <div
+                <Link
+                  to={`/translation?seriesId=${series.id}&chapterId=${chapter.id}`}
                   key={chapter.id}
-                  className="flex justify-between items-center p-3 rounded-sm border border-[#d8cdbd] hover:bg-[#f2eadc]/20 transition-colors cursor-default"
+                  className="flex justify-between items-center p-3 rounded-sm border border-[#d8cdbd] hover:bg-[#f2eadc]/20 transition-colors cursor-pointer group"
                 >
                   <div className="flex-1">
-                    <div className="text-sm font-serif text-[#4A3D39]">
+                    <div className="text-sm font-serif text-[#4A3D39] group-hover:text-[#8b2626] transition-colors">
                       Chapter {chapter.number}
                       {chapter.title && ` — ${chapter.title}`}
                     </div>
@@ -300,7 +301,7 @@ export function SeriesDetail() {
                   <span className="text-[9px] text-[#a0908b] font-sans ml-4">
                     {formatDate(chapter.createdAt)}
                   </span>
-                </div>
+                </Link>
               ))}
             </div>
           )}

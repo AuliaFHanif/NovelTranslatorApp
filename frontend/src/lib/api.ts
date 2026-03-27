@@ -21,6 +21,84 @@ export interface Chapter {
   updatedAt: string;
 }
 
+export type TranslationPassState =
+  | "idle"
+  | "pass1_done"
+  | "pass2_done"
+  | "pass3_done";
+
+export interface Act {
+  id: number;
+  chapterId: number;
+  order: number;
+  rawActText: string | null;
+  pass1Analysis: string | null;
+  pass2Draft: string | null;
+  pass3Final: string | null;
+  currentPass: TranslationPassState;
+  lastRunAt: string | null;
+  llmMeta: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TranslationChapter extends Chapter {
+  translationStatus: TranslationPassState;
+  lastTranslatedAt: string | null;
+  Series: Pick<Series, "id" | "title" | "language" | "genre">;
+}
+
+export interface TranslationProgress {
+  totalActs: number;
+  pass1Done: number;
+  pass2Done: number;
+  pass3Done: number;
+}
+
+export interface TranslationBootstrapResponse {
+  chapter: TranslationChapter;
+  acts: Act[];
+  progress: TranslationProgress;
+}
+
+export interface TranslationPassResult {
+  act: Act;
+  pass: 1 | 2 | 3;
+  output: string;
+}
+
+export interface ChapterPassResult {
+  pass: 1 | 2 | 3;
+  completed: number;
+  failed: number;
+  failures: Array<{
+    actId: number;
+    status: number;
+    error: string;
+    message?: string;
+  }>;
+  acts: Act[];
+}
+
+export interface Genre {
+  id: number;
+  name: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AIModel {
+  id: number;
+  name: string;
+  modelId: string;
+  provider: "lm-studio" | "openai" | "claude" | "other";
+  description: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface ApiListResponse<T> {
   success: boolean;
   count: number;
@@ -150,4 +228,178 @@ export async function deleteSeries(id: number): Promise<void> {
 
 export async function getHealthStatus(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/health");
+}
+
+export async function getTranslationChapter(
+  seriesId: number,
+  chapterId: number,
+): Promise<TranslationBootstrapResponse> {
+  const result = await requestJson<
+    ApiItemResponse<TranslationBootstrapResponse>
+  >(`/translation/translate/${seriesId}/chapter/${chapterId}`);
+  return result.data;
+}
+
+export async function runActPass(
+  actId: number,
+  pass: 1 | 2 | 3,
+  options?: {
+    force?: boolean;
+    model?: string;
+    temperature?: number;
+    top_p?: number;
+    max_tokens?: number;
+  },
+): Promise<TranslationPassResult> {
+  const result = await requestJson<ApiItemResponse<TranslationPassResult>>(
+    `/translation/acts/${actId}/pass`,
+    {
+      method: "POST",
+      body: JSON.stringify({ pass, ...(options || {}) }),
+    },
+  );
+
+  return result.data;
+}
+
+export async function runChapterPass(
+  chapterId: number,
+  pass: 1 | 2 | 3,
+  options?: {
+    force?: boolean;
+    model?: string;
+    temperature?: number;
+    top_p?: number;
+    max_tokens?: number;
+  },
+): Promise<ChapterPassResult> {
+  const result = await requestJson<ApiItemResponse<ChapterPassResult>>(
+    `/translation/chapters/${chapterId}/pass`,
+    {
+      method: "POST",
+      body: JSON.stringify({ pass, ...(options || {}) }),
+    },
+  );
+
+  return result.data;
+}
+
+export async function updateAct(
+  actId: number,
+  payload: {
+    rawActText?: string;
+    pass2Draft?: string;
+    pass3Final?: string;
+  },
+): Promise<Act> {
+  const result = await requestJson<ApiItemResponse<Act>>(
+    `/translation/acts/${actId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+
+  return result.data;
+}
+
+/**
+ * GENRE API FUNCTIONS
+ */
+
+export async function listGenres(): Promise<Genre[]> {
+  const result = await requestJson<ApiListResponse<Genre>>("/settings/genres");
+  return result.data;
+}
+
+export async function createGenre(payload: {
+  name: string;
+  description?: string;
+}): Promise<Genre> {
+  const result = await requestJson<ApiItemResponse<Genre>>("/settings/genres", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+  return result.data;
+}
+
+export async function updateGenre(
+  id: number,
+  payload: {
+    name?: string;
+    description?: string;
+  },
+): Promise<Genre> {
+  const result = await requestJson<ApiItemResponse<Genre>>(
+    `/settings/genres/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+
+  return result.data;
+}
+
+export async function deleteGenre(id: number): Promise<void> {
+  await requestJson<ApiItemResponse<void>>(`/settings/genres/${id}`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * AI MODEL API FUNCTIONS
+ */
+
+export async function listAIModels(): Promise<AIModel[]> {
+  const result = await requestJson<ApiListResponse<AIModel>>(
+    "/settings/ai-models",
+  );
+  return result.data;
+}
+
+export async function createAIModel(payload: {
+  name: string;
+  modelId: string;
+  provider?: "lm-studio" | "openai" | "claude" | "other";
+  description?: string;
+  isActive?: boolean;
+}): Promise<AIModel> {
+  const result = await requestJson<ApiItemResponse<AIModel>>(
+    "/settings/ai-models",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+
+  return result.data;
+}
+
+export async function updateAIModel(
+  id: number,
+  payload: {
+    name?: string;
+    modelId?: string;
+    provider?: "lm-studio" | "openai" | "claude" | "other";
+    description?: string;
+    isActive?: boolean;
+  },
+): Promise<AIModel> {
+  const result = await requestJson<ApiItemResponse<AIModel>>(
+    `/settings/ai-models/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+
+  return result.data;
+}
+
+export async function deleteAIModel(id: number): Promise<void> {
+  await requestJson<ApiItemResponse<void>>(`/settings/ai-models/${id}`, {
+    method: "DELETE",
+  });
 }
