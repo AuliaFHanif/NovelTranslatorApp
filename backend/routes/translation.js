@@ -162,7 +162,10 @@ async function collectGlossaryForAct(chapter, actId) {
 async function aggregateChapterFinalText(chapterId) {
   const acts = await Act.findAll({
     where: { chapterId },
-    order: [["order", "ASC"]],
+    order: [
+      ["order", "ASC"],
+      ["splitIndex", "ASC"],
+    ],
   });
 
   const finalText = acts
@@ -350,20 +353,13 @@ router.get("/translate/:seriesId/chapter/:chapterId", async (req, res) => {
         .json({ error: "Chapter does not belong to this series" });
     }
 
-    let acts = await Act.findAll({
+    const acts = await Act.findAll({
       where: { chapterId },
-      order: [["order", "ASC"]],
+      order: [
+        ["order", "ASC"],
+        ["splitIndex", "ASC"],
+      ],
     });
-
-    if (acts.length === 0 && chapter.rawText) {
-      const created = await Act.create({
-        chapterId: chapter.id,
-        order: 1,
-        rawActText: chapter.rawText,
-        currentPass: "idle",
-      });
-      acts = [created];
-    }
 
     const progress = {
       totalActs: acts.length,
@@ -444,7 +440,10 @@ router.post("/chapters/:chapterId/pass", async (req, res) => {
 
     const acts = await Act.findAll({
       where: { chapterId },
-      order: [["order", "ASC"]],
+      order: [
+        ["order", "ASC"],
+        ["splitIndex", "ASC"],
+      ],
     });
 
     if (!acts.length) {
@@ -481,7 +480,10 @@ router.post("/chapters/:chapterId/pass", async (req, res) => {
 
     const refreshedActs = await Act.findAll({
       where: { chapterId },
-      order: [["order", "ASC"]],
+      order: [
+        ["order", "ASC"],
+        ["splitIndex", "ASC"],
+      ],
     });
 
     if (pass === 3 && failures.length === 0) {

@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const { Series, Chapter, Act } = require("../models");
+const { runArchitectPhase } = require("../controllers/architectController");
 
 /**
  * GET /api/chapters
@@ -86,6 +87,12 @@ router.post("/", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+/**
+ * POST /api/chapters/:chapterId/architect
+ * Run Phase 2 Architect segmentation for a chapter
+ */
+router.post("/:chapterId/architect", runArchitectPhase);
 
 /**
  * GET /api/chapters/:id

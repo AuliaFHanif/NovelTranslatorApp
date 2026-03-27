@@ -26,12 +26,16 @@ module.exports = (sequelize, DataTypes) => {
       title: DataTypes.STRING,
       rawText: DataTypes.TEXT,
       finalText: DataTypes.TEXT,
-      translationStatus: DataTypes.ENUM(
-        "idle",
-        "pass1_done",
-        "pass2_done",
-        "pass3_done",
-      ),
+      status: {
+        type: DataTypes.ENUM("paste", "architect", "ready"),
+        allowNull: false,
+        defaultValue: "paste",
+      },
+      translationStatus: {
+        type: DataTypes.ENUM("idle", "pass1_done", "pass2_done", "pass3_done"),
+        allowNull: false,
+        defaultValue: "idle",
+      },
       lastTranslatedAt: DataTypes.DATE,
     },
     {

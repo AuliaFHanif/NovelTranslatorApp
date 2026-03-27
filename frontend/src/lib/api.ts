@@ -80,6 +80,30 @@ export interface ChapterPassResult {
   acts: Act[];
 }
 
+export interface ArchitectResult {
+  success?: boolean;
+  chapterId: number;
+  actsCreated: number;
+  segmentationSource: "ai" | "fallback";
+  pass1Diagnostics?: {
+    paragraphCount: number;
+    boundaryCount: number;
+    lastBoundary: number;
+    coveredParagraphs: number;
+    coveragePercent: number;
+    gapCount: number;
+  };
+  acts: Array<{
+    id: number;
+    label: string;
+    order: number;
+    splitIndex: number;
+    tokenCount: number;
+    status: string;
+    dependsOn: number | null;
+  }>;
+}
+
 export interface Genre {
   id: number;
   name: string;
@@ -226,6 +250,12 @@ export async function deleteSeries(id: number): Promise<void> {
   });
 }
 
+export async function deleteChapter(id: number): Promise<void> {
+  await requestJson<ApiItemResponse<void>>(`/chapters/${id}`, {
+    method: "DELETE",
+  });
+}
+
 export async function getHealthStatus(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/health");
 }
@@ -282,6 +312,23 @@ export async function runChapterPass(
   );
 
   return result.data;
+}
+
+export async function runArchitectPhase(
+  chapterId: number,
+): Promise<ArchitectResult> {
+  const result = await requestJson<
+    ArchitectResult | ApiItemResponse<ArchitectResult>
+  >(`/chapters/${chapterId}/architect`, {
+    method: "POST",
+  });
+
+  // Architect endpoint can return either a flat payload or { data } wrapper.
+  if (result && typeof result === "object" && "data" in result) {
+    return result.data;
+  }
+
+  return result as ArchitectResult;
 }
 
 export async function updateAct(

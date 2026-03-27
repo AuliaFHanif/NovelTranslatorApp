@@ -14,6 +14,7 @@ import {
   getTranslationChapter,
   listAIModels,
   LLM_PROXY_ENDPOINT,
+  runArchitectPhase,
   runActPass,
   runChapterPass,
   updateAct,
@@ -56,6 +57,7 @@ export function Translation() {
     }),
     [acts],
   );
+  const isLmStudioOnline = apiStatus === "ok";
 
   useEffect(() => {
     async function loadModels() {
@@ -78,6 +80,11 @@ export function Translation() {
 
   useEffect(() => {
     void loadTranslationChapter();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seriesId, chapterId]);
+
+  useEffect(() => {
+    void runConnectionTest(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seriesId, chapterId]);
 
@@ -106,7 +113,14 @@ export function Translation() {
       const response = await getTranslationChapter(seriesId, chapterId);
       setChapter(response.chapter);
       setActs(response.acts);
-      setSelectedActId((current) => current ?? response.acts[0]?.id ?? null);
+      setSelectedActId((current) => {
+        if (!current) {
+          return response.acts[0]?.id ?? null;
+        }
+
+        const stillExists = response.acts.some((act) => act.id === current);
+        return stillExists ? current : (response.acts[0]?.id ?? null);
+      });
     } catch (error) {
       await showError(
         "Failed to Load Chapter",
@@ -122,6 +136,14 @@ export function Translation() {
   async function handleRunActPass(pass: 1 | 2 | 3) {
     if (!selectedAct) {
       await showInfo("No Act Selected", "Select an act before running a pass.");
+      return;
+    }
+
+    if (!isLmStudioOnline) {
+      await showError(
+        "LM Studio Offline",
+        "Cannot run passes while LM Studio is offline.",
+      );
       return;
     }
 
@@ -150,8 +172,27 @@ export function Translation() {
       return;
     }
 
+    if (!isLmStudioOnline) {
+      await showError(
+        "LM Studio Offline",
+        "Cannot run global passes while LM Studio is offline.",
+      );
+      return;
+    }
+
     try {
       setIsRunningPass(true);
+
+      if (pass === 1) {
+        const result = await runArchitectPhase(chapter.id);
+        await loadTranslationChapter();
+        await showSuccess(
+          "Pass 1 Completed",
+          `Architect segmented chapter into ${result.actsCreated} act(s) using ${result.segmentationSource}.`,
+        );
+        return;
+      }
+
       const result = await runChapterPass(chapter.id, pass, {
         model: modelName,
       });
@@ -219,32 +260,49 @@ export function Translation() {
     return `${(value || "").length.toLocaleString()} chars`;
   }
 
-  async function handleTestConnection() {
+  async function runConnectionTest(silent = false) {
     try {
       setApiStatus("testing");
       const health = await getHealthStatus();
-      if (health.status === "ok") {
+      const lmStudioStatus = health.services?.lmStudio?.status;
+      const lmStudioMessage =
+        health.services?.lmStudio?.message ||
+        "LM Studio service is not available.";
+
+      if (health.status === "ok" && lmStudioStatus === "connected") {
         setApiStatus("ok");
-        await showSuccess(
-          "Connection Successful",
-          "API is responding correctly.",
-        );
+        if (!silent) {
+          await showSuccess(
+            "Connection Successful",
+            "API and LM Studio are responding correctly.",
+          );
+        }
       } else {
         setApiStatus("error");
-        await showError(
-          "Connection Failed",
-          "API responded but with an error status.",
-        );
+        if (!silent) {
+          await showError(
+            "Connection Failed",
+            lmStudioStatus === "disconnected"
+              ? lmStudioMessage
+              : "API responded but LM Studio is not connected.",
+          );
+        }
       }
     } catch (err) {
       setApiStatus("error");
-      await showError(
-        "Connection Failed",
-        err instanceof Error
-          ? err.message
-          : "Unable to reach the API endpoint.",
-      );
+      if (!silent) {
+        await showError(
+          "Connection Failed",
+          err instanceof Error
+            ? err.message
+            : "Unable to reach the API endpoint.",
+        );
+      }
     }
+  }
+
+  async function handleTestConnection() {
+    await runConnectionTest(false);
   }
 
   if (isLoadingChapter) {
@@ -315,17 +373,15 @@ export function Translation() {
             </div>
             <div className="flex items-center gap-3">
               <span className="text-[9px] tracking-widest font-sans text-[#a0908b]">
-                {formatCharCount(selectedAct?.rawActText)}
+                {formatCharCount(chapter.rawText)}
               </span>
               <span className="text-[8px] font-sans text-[#a0908b] uppercase tracking-widest">
-                ACT {selectedAct?.order || "-"}
+                CHAPTER INPUT
               </span>
             </div>
           </div>
-          <div className="flex-1 p-6 overflow-y-auto text-base leading-[2.2] font-serif text-[#4A3D39]">
-            {selectedAct?.rawActText ||
-              chapter.rawText ||
-              "No source text available."}
+          <div className="flex-1 p-6 overflow-y-auto whitespace-pre-wrap wrap-break-word text-base leading-[2.2] font-serif text-[#4A3D39]">
+            {chapter.rawText || "No source text available."}
           </div>
         </div>
 
@@ -365,21 +421,21 @@ export function Translation() {
           <div className="flex-[0.55] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm opacity-90 min-h-0">
             <div className="px-4 py-2 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
               <span className="text-[10px] font-bold font-sans text-[#4A3D39]">
-                Act {selectedAct?.order || "-"}
+                Act {selectedAct?.order || "-"} Source
               </span>
               <span className="text-[9px] tracking-[0.1em] font-sans text-[#a0908b]">
                 {formatCharCount(selectedAct?.rawActText)}
               </span>
             </div>
-            <div className="flex-1 p-5 overflow-y-auto text-[13px] leading-loose font-serif text-[#4A3D39]">
-              {selectedAct?.pass1Analysis ||
-                "Run Pass 1 to generate analysis notes for this act."}
+            <div className="flex-1 p-5 overflow-y-auto whitespace-pre-wrap wrap-break-word text-[13px] leading-loose font-serif text-[#4A3D39]">
+              {selectedAct?.rawActText ||
+                "Select an act to view its source text here."}
             </div>
             <div className="flex justify-between p-2 pt-0 gap-2 shrink-0 bg-[#FBF9F6]">
               <Button
                 variant="outline"
                 onClick={() => void handleRunActPass(1)}
-                disabled={isRunningPass || !selectedAct}
+                disabled={isRunningPass || !selectedAct || !isLmStudioOnline}
                 className="flex-1 h-8 text-[9px] tracking-[0.1em] bg-[#e8dfcf] hover:bg-[#d8cdbd] border-none text-[#a0908b] font-sans uppercase rounded-sm"
               >
                 Pass 1
@@ -387,7 +443,7 @@ export function Translation() {
               <Button
                 variant="outline"
                 onClick={() => void handleRunActPass(2)}
-                disabled={isRunningPass || !selectedAct}
+                disabled={isRunningPass || !selectedAct || !isLmStudioOnline}
                 className="flex-1 h-8 text-[9px] tracking-[0.1em] bg-[#e8dfcf] hover:bg-[#d8cdbd] border-none text-[#a0908b] font-sans uppercase rounded-sm"
               >
                 Pass 2
@@ -395,7 +451,7 @@ export function Translation() {
               <Button
                 variant="outline"
                 onClick={() => void handleRunActPass(3)}
-                disabled={isRunningPass || !selectedAct}
+                disabled={isRunningPass || !selectedAct || !isLmStudioOnline}
                 className="flex-1 h-8 text-[9px] tracking-[0.1em] bg-[#e8dfcf] hover:bg-[#d8cdbd] border-none text-[#a0908b] font-sans uppercase rounded-sm"
               >
                 Pass 3
@@ -548,11 +604,11 @@ export function Translation() {
           <div className="flex gap-3">
             <Button
               onClick={() => void handleRunChapterPass(1)}
-              disabled={isRunningPass || progress.total === 0}
+              disabled={isRunningPass || !isLmStudioOnline}
               className="h-8 text-[9px] tracking-[0.1em] bg-[#d0a080] hover:bg-[#bd8c6c] text-white font-sans uppercase rounded-sm px-5 flex items-center gap-2"
             >
               <span className="text-[10px]">
-                {progress.pass1Done === progress.total && progress.total > 0
+                {progress.total > 0 && progress.pass1Done === progress.total
                   ? "✔"
                   : "〇"}
               </span>{" "}
@@ -560,7 +616,9 @@ export function Translation() {
             </Button>
             <Button
               onClick={() => void handleRunChapterPass(2)}
-              disabled={isRunningPass || progress.total === 0}
+              disabled={
+                isRunningPass || progress.total === 0 || !isLmStudioOnline
+              }
               className="h-8 text-[9px] tracking-[0.1em] bg-[#d0a080] hover:bg-[#bd8c6c] text-white font-sans uppercase rounded-sm px-5 flex items-center gap-2"
             >
               <span className="text-[10px]">
@@ -572,7 +630,9 @@ export function Translation() {
             </Button>
             <Button
               onClick={() => void handleRunChapterPass(3)}
-              disabled={isRunningPass || progress.total === 0}
+              disabled={
+                isRunningPass || progress.total === 0 || !isLmStudioOnline
+              }
               className="h-8 text-[9px] tracking-[0.1em] bg-[#8b2626] hover:bg-[#701c1c] text-white font-sans uppercase rounded-sm px-5 flex items-center gap-2"
             >
               <span className="text-[10px] text-[#f2eadc]">
