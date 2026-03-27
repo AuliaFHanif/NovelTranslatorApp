@@ -110,6 +110,8 @@ function smoothBoundaries(boundaries, paragraphs) {
     .filter((v) => Number.isInteger(v) && v >= 1 && v <= maxParagraph)
     .sort((a, b) => a - b);
 
+  const MIN_PARAGRAPHS_PER_ACT =
+    Number(process.env.MIN_PARAGRAPHS_PER_ACT) || 2;
   const adjusted = [];
 
   for (const rawBoundary of normalized) {
@@ -153,14 +155,29 @@ function smoothBoundaries(boundaries, paragraphs) {
   }
 
   const dedupedAdjusted = [...new Set(adjusted)].sort((a, b) => a - b);
-  if (
-    dedupedAdjusted.length === 0 ||
-    dedupedAdjusted[dedupedAdjusted.length - 1] !== maxParagraph
-  ) {
-    dedupedAdjusted.push(maxParagraph);
+
+  // Avoid over-fragmenting into tiny acts unless this is the final segment.
+  const minSpan = Math.max(1, MIN_PARAGRAPHS_PER_ACT);
+  const spanFiltered = [];
+  let lastBoundary = 0;
+
+  for (const boundary of dedupedAdjusted) {
+    const span = boundary - lastBoundary;
+    const isFinal = boundary === maxParagraph;
+    if (isFinal || span >= minSpan) {
+      spanFiltered.push(boundary);
+      lastBoundary = boundary;
+    }
   }
 
-  return dedupedAdjusted;
+  const finalBoundaries =
+    spanFiltered.length > 0 ? spanFiltered : [maxParagraph];
+
+  if (finalBoundaries[finalBoundaries.length - 1] !== maxParagraph) {
+    finalBoundaries.push(maxParagraph);
+  }
+
+  return finalBoundaries;
 }
 
 async function callSegmentationAI(paragraphs, retries = 3) {
