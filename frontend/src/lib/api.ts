@@ -30,12 +30,15 @@ export type TranslationPassState =
 export interface Act {
   id: number;
   chapterId: number;
-  order: number;
-  rawActText: string | null;
-  pass1Analysis: string | null;
-  pass2Draft: string | null;
-  pass3Final: string | null;
-  currentPass: TranslationPassState;
+  sequence: number;
+  label: string;
+  rawText: string;
+  translation: string | null;
+  anatomyProfile?: {
+    legacyAnalysis?: string;
+    draftTranslation?: string;
+  };
+  status: string;
   lastRunAt: string | null;
   llmMeta: Record<string, unknown> | null;
   createdAt: string;
@@ -43,8 +46,7 @@ export interface Act {
 }
 
 export interface TranslationChapter extends Chapter {
-  translationStatus: TranslationPassState;
-  lastTranslatedAt: string | null;
+  status: string;
   Series: Pick<Series, "id" | "title" | "language" | "genre">;
 }
 
@@ -96,11 +98,8 @@ export interface ArchitectResult {
   acts: Array<{
     id: number;
     label: string;
-    order: number;
-    splitIndex: number;
-    tokenCount: number;
+    sequence: number;
     status: string;
-    dependsOn: number | null;
   }>;
 }
 
@@ -334,9 +333,9 @@ export async function runArchitectPhase(
 export async function updateAct(
   actId: number,
   payload: {
-    rawActText?: string;
-    pass2Draft?: string;
-    pass3Final?: string;
+    rawText?: string;
+    draftTranslation?: string;
+    translation?: string;
   },
 ): Promise<Act> {
   const result = await requestJson<ApiItemResponse<Act>>(

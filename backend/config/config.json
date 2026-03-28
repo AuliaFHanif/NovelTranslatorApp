@@ -2,21 +2,21 @@
   "development": {
     "username": "postgres",
     "password": "postgres",
-    "database": "novel_translator_V4",
+    "database": "novelTranslatorV4",
     "host": "127.0.0.1",
     "dialect": "postgres"
   },
   "test": {
     "username": "postgres",
     "password": "postgres",
-    "database": "novel_translator_V4_test",
+    "database": "novelTranslatorV4_test",
     "host": "127.0.0.1",
     "dialect": "postgres"
   },
   "production": {
     "username": "postgres",
     "password": "postgres",
-    "database": "novel_translator_V4_production",
+    "database": "novelTranslatorV4_production",
     "host": "127.0.0.1",
     "dialect": "postgres"
   }

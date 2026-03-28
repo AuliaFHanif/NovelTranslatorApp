@@ -1,85 +1,134 @@
-"use strict";
-const { Model } = require("sequelize");
+'use strict';
+const { Model } = require('sequelize');
+
 module.exports = (sequelize, DataTypes) => {
   class Act extends Model {
-    /**
-     * Helper method for defining associations.
-     * This method is not a part of Sequelize lifecycle.
-     * The `models/index` file will call this method automatically.
-     */
     static associate(models) {
-      this.belongsTo(models.Chapter, { foreignKey: "chapterId" });
-      this.belongsTo(models.Act, {
-        as: "ParentAct",
-        foreignKey: "parentActId",
-      });
-      this.belongsTo(models.Act, {
-        as: "GlossaryScopeAct",
-        foreignKey: "glossaryScopeId",
-      });
-      this.belongsTo(models.Act, {
-        as: "DependsOnAct",
-        foreignKey: "dependsOnActId",
-      });
-      this.hasMany(models.Act, {
-        as: "ChildSplits",
-        foreignKey: "parentActId",
-      });
-      this.hasMany(models.GlossaryEntry, {
-        foreignKey: "scopeId",
-        scope: "act",
+      // Belongs to chapter
+      if (models.Chapter) {
+        Act.belongsTo(models.Chapter, { 
+          foreignKey: 'chapterId',
+          as: 'Chapter'
+        });
+      }
+
+      // Many-to-many: Act <-> GlossaryTerm via TermAppearance
+      if (models.GlossaryTerm && models.TermAppearance) {
+        Act.belongsToMany(models.GlossaryTerm, {
+          through: models.TermAppearance,
+          foreignKey: 'actId',
+          otherKey: 'termId',
+          as: 'Terms'
+        });
+      }
+
+      // Self-referential: Dependencies (this act depends on others)
+      if (models.ActDependency) {
+        Act.belongsToMany(models.Act, {
+          through: {
+            model: models.ActDependency,
+            unique: false
+          },
+          as: 'Dependencies',
+          foreignKey: 'actId',
+          otherKey: 'dependsOnActId'
+        });
+
+        // Self-referential: Dependents (other acts depend on this)
+        Act.belongsToMany(models.Act, {
+          through: {
+            model: models.ActDependency,
+            unique: false
+          },
+          as: 'Dependents',
+          foreignKey: 'dependsOnActId',
+          otherKey: 'actId'
+        });
+      }
+    }
+
+    // Get previous act in sequence (simple!)
+    async getPrevious() {
+      return await Act.findOne({
+        where: {
+          chapterId: this.chapterId,
+          sequence: this.sequence - 1
+        }
       });
     }
+
+    // Get next act in sequence
+    async getNext() {
+      return await Act.findOne({
+        where: {
+          chapterId: this.chapterId,
+          sequence: this.sequence + 1
+        }
+      });
+    }
+
+    // Get all glossary terms for this act with appearance data
+    async getTermsWithContext() {
+      const terms = await this.getTerms();
+      return terms;
+    }
+
+    // Check if this act can be translated (all dependencies ready)
+    async canTranslate() {
+      const deps = await this.getDependencies();
+      for (const dep of deps) {
+        if (dep.status !== 'complete' && dep.status !== 'ready') {
+          return false;
+        }
+      }
+      return true;
+    }
   }
-  Act.init(
-    {
-      chapterId: DataTypes.INTEGER,
-      order: DataTypes.INTEGER,
-      label: DataTypes.STRING,
-      rawActText: DataTypes.TEXT,
-      parentActId: DataTypes.INTEGER,
-      splitIndex: {
-        type: DataTypes.INTEGER,
-        allowNull: false,
-        defaultValue: 0,
-      },
-      glossaryScopeId: DataTypes.INTEGER,
-      dependsOnActId: DataTypes.INTEGER,
-      status: {
-        type: DataTypes.ENUM(
-          "pending",
-          "ready",
-          "profiled",
-          "translated",
-          "complete",
-          "blocked",
-        ),
-        allowNull: false,
-        defaultValue: "pending",
-      },
-      boundaryStart: DataTypes.INTEGER,
-      boundaryEnd: DataTypes.INTEGER,
-      tokenCount: DataTypes.INTEGER,
-      source: {
-        type: DataTypes.ENUM("ai", "fallback"),
-        allowNull: false,
-        defaultValue: "fallback",
-      },
-      pass1Analysis: DataTypes.TEXT,
-      pass2Draft: DataTypes.TEXT,
-      pass3Final: DataTypes.TEXT,
-      currentPass: {
-        type: DataTypes.ENUM("idle", "pass1_done", "pass2_done", "pass3_done"),
-        allowNull: false,
-        defaultValue: "idle",
-      },
-      lastRunAt: DataTypes.DATE,
-      llmMeta: DataTypes.JSONB,
+
+  Act.init({
+    chapterId: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      references: {
+        model: 'Chapters',
+        key: 'id'
+      }
     },
-    {
-      sequelize,
-      modelName: "Act",
+    sequence: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      validate: { min: 1 },
+      comment: 'Continuous integer sequence, NOT hierarchical'
     },
-  );
+    label: {
+      type: DataTypes.STRING(10),
+      allowNull: false,
+      comment: 'Display label: "1", "2", "2A", "2B"'
+    },
+    rawText: {
+      type: DataTypes.TEXT,
+      allowNull: false
+    },
+    translation: DataTypes.TEXT,
+    tokenCount: {
+      type: DataTypes.INTEGER,
+      defaultValue: 0
+    },
+    segmentSource: DataTypes.ENUM('ai', 'fallback', 'manual'),
+    status: {
+      type: DataTypes.ENUM('pending', 'processing', 'ready', 'complete'),
+      defaultValue: 'pending'
+    },
+    anatomyProfile: DataTypes.JSONB
+  }, {
+    sequelize,
+    modelName: 'Act',
+    tableName: 'Acts',
+    timestamps: true,
+    indexes: [
+      { unique: true, fields: ['chapterId', 'sequence'] }
+    ]
+  });
+
   return Act;
 };

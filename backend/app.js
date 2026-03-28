@@ -6,6 +6,7 @@ const seriesRoutes = require("./routes/series");
 const proxyRoutes = require("./routes/proxy");
 const translationRoutes = require("./routes/translation");
 const settingsRoutes = require("./routes/settings");
+const lexicographerRoutes = require("./routes/lexicographer");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -28,6 +29,7 @@ app.use("/api/llm", proxyRoutes);
 app.use("/api/health", proxyRoutes);
 app.use("/api/translation", translationRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api", lexicographerRoutes);
 
 // Health check endpoint
 app.get("/health", (req, res) => {

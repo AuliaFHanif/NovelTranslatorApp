@@ -51,9 +51,9 @@ export function Translation() {
   const progress = useMemo(
     () => ({
       total: acts.length,
-      pass1Done: acts.filter((act) => Boolean(act.pass1Analysis)).length,
-      pass2Done: acts.filter((act) => Boolean(act.pass2Draft)).length,
-      pass3Done: acts.filter((act) => Boolean(act.pass3Final)).length,
+      pass1Done: acts.filter((act) => Boolean(act.anatomyProfile?.legacyAnalysis)).length,
+      pass2Done: acts.filter((act) => Boolean(act.anatomyProfile?.draftTranslation)).length,
+      pass3Done: acts.filter((act) => Boolean(act.translation)).length,
     }),
     [acts],
   );
@@ -90,7 +90,7 @@ export function Translation() {
 
   useEffect(() => {
     setEditableTranslation(
-      selectedAct?.pass3Final || selectedAct?.pass2Draft || "",
+      selectedAct?.translation || selectedAct?.anatomyProfile?.draftTranslation || "",
     );
   }, [selectedAct]);
 
@@ -228,7 +228,7 @@ export function Translation() {
     try {
       setIsSaving(true);
       await updateAct(selectedAct.id, {
-        pass3Final: editableTranslation.trim(),
+        translation: editableTranslation.trim(),
       });
       await loadTranslationChapter();
       await showSuccess("Saved", "Translation was saved for the selected act.");
@@ -408,10 +408,10 @@ export function Translation() {
                   onClick={() => setSelectedActId(act.id)}
                 >
                   <span className="font-bold font-sans text-[10px]">
-                    Act {act.order}
+                    Act {act.sequence} ({act.label})
                   </span>
                   <span className="text-[9px] font-sans text-[#a0908b]">
-                    &mdash; {(act.rawActText || "").length}
+                    &mdash; {(act.rawText || "").length}
                   </span>
                 </div>
               ))}
@@ -421,14 +421,14 @@ export function Translation() {
           <div className="flex-[0.55] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm opacity-90 min-h-0">
             <div className="px-4 py-2 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
               <span className="text-[10px] font-bold font-sans text-[#4A3D39]">
-                Act {selectedAct?.order || "-"} Source
+                Act {selectedAct?.sequence || "-"} ({selectedAct?.label || "-"}) Source
               </span>
               <span className="text-[9px] tracking-[0.1em] font-sans text-[#a0908b]">
-                {formatCharCount(selectedAct?.rawActText)}
+                {formatCharCount(selectedAct?.rawText)}
               </span>
             </div>
             <div className="flex-1 p-5 overflow-y-auto whitespace-pre-wrap wrap-break-word text-[13px] leading-loose font-serif text-[#4A3D39]">
-              {selectedAct?.rawActText ||
+              {selectedAct?.rawText ||
                 "Select an act to view its source text here."}
             </div>
             <div className="flex justify-between p-2 pt-0 gap-2 shrink-0 bg-[#FBF9F6]">
@@ -472,7 +472,7 @@ export function Translation() {
             </div>
             <div className="flex-1 overflow-y-auto p-1 py-2">
               {acts.map((act) => {
-                const output = act.pass3Final || act.pass2Draft || "";
+                const output = act.translation || act.anatomyProfile?.draftTranslation || "";
                 return (
                   <div
                     key={act.id}
@@ -484,7 +484,7 @@ export function Translation() {
                     onClick={() => setSelectedActId(act.id)}
                   >
                     <span className="font-bold font-sans text-[10px]">
-                      Act {act.order}
+                      Act {act.sequence} ({act.label})
                     </span>
                     <span className="text-[9px] font-sans text-[#a0908b]">
                       &mdash; {output.length}
@@ -498,7 +498,7 @@ export function Translation() {
           <div className="flex-[0.55] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm opacity-90 min-h-0">
             <div className="px-4 py-2 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
               <span className="text-[10px] font-bold font-sans text-[#4A3D39]">
-                Act {selectedAct?.order || "-"} Translation
+                Act {selectedAct?.sequence || "-"} ({selectedAct?.label || "-"}) Translation
               </span>
               <span className="text-[9px] tracking-[0.1em] font-sans text-[#a0908b]">
                 {formatCharCount(editableTranslation)}

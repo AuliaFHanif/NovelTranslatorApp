@@ -14,7 +14,7 @@ router.get("/", async (req, res) => {
 
     const chapters = await Chapter.findAll({
       where,
-      include: [{ model: Series, attributes: ["id", "title", "language"] }],
+      include: [{ model: Series, as: 'Series', attributes: ["id", "title", "language"] }],
       order: [["number", "ASC"]],
     });
 
@@ -104,8 +104,8 @@ router.get("/:id", async (req, res) => {
 
     const chapter = await Chapter.findByPk(id, {
       include: [
-        { model: Series, attributes: ["id", "title", "language"] },
-        { model: Act },
+        { model: Series, as: 'Series', attributes: ["id", "title", "language"] },
+        { model: Act, as: 'Acts' },
       ],
     });
 

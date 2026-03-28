@@ -1,6 +1,6 @@
 const express = require("express");
 const axios = require("axios");
-const { Act, Chapter, Series, GlossaryEntry, Glossary } = require("../models");
+const { Act, Chapter, Series, GlossaryTerm } = require("../models");
 const { Op } = require("sequelize");
 
 const router = express.Router();
@@ -120,15 +120,14 @@ function formatGlossary(entries, language) {
     return "";
   }
 
-  const termField = language === "ja" ? "term_ja" : "term_zh";
+  const termField = language === "ja" ? "termJa" : "termZh";
   return entries
     .map((entry) => {
       const sourceTerm =
         entry[termField] ||
-        entry.term_ja ||
-        entry.term_zh ||
+        entry.canonicalForm ||
         "(no source term)";
-      const englishTerm = entry.term_en || "(no English term)";
+      const englishTerm = entry.termEn || "(no English term)";
       const definition = entry.definition ? ` - ${entry.definition}` : "";
       return `- ${sourceTerm} => ${englishTerm}${definition}`;
     })
@@ -136,40 +135,26 @@ function formatGlossary(entries, language) {
 }
 
 async function collectGlossaryForAct(chapter, actId) {
-  const entries = await GlossaryEntry.findAll({
+  const entries = await GlossaryTerm.findAll({
     where: {
-      scopeId: {
-        [Op.in]: [chapter.seriesId, chapter.id, actId],
-      },
+      seriesId: chapter.seriesId
     },
-    include: [{ model: Glossary, attributes: ["id", "name", "type"] }],
     order: [["updatedAt", "DESC"]],
   });
 
-  const scoped = entries.filter((entry) => {
-    if (entry.scope === "series") {
-      return entry.scopeId === chapter.seriesId;
-    }
-    if (entry.scope === "chapter") {
-      return entry.scopeId === chapter.id;
-    }
-    return entry.scope === "act" && entry.scopeId === actId;
-  });
-
-  return scoped;
+  return entries;
 }
 
 async function aggregateChapterFinalText(chapterId) {
   const acts = await Act.findAll({
     where: { chapterId },
     order: [
-      ["order", "ASC"],
-      ["splitIndex", "ASC"],
+      ["sequence", "ASC"]
     ],
   });
 
   const finalText = acts
-    .map((act) => (act.pass3Final || "").trim())
+    .map((act) => (act.translation || "").trim())
     .filter(Boolean)
     .join("\n\n");
 
@@ -179,11 +164,10 @@ async function aggregateChapterFinalText(chapterId) {
   }
 
   chapter.finalText = finalText || null;
-  chapter.translationStatus =
-    acts.length > 0 && acts.every((act) => act.pass3Final)
-      ? "pass3_done"
-      : chapter.translationStatus;
-  chapter.lastTranslatedAt = new Date();
+  chapter.status =
+    acts.length > 0 && acts.every((act) => act.translation)
+      ? "ready"
+      : chapter.status;
   await chapter.save();
 }
 
@@ -197,7 +181,7 @@ async function runPassOnAct({
   max_tokens,
 }) {
   const chapter = await Chapter.findByPk(act.chapterId, {
-    include: [{ model: Series, attributes: ["id", "language", "title"] }],
+    include: [{ model: Series, as: 'Series', attributes: ["id", "language", "title"] }],
   });
 
   if (!chapter) {
@@ -217,9 +201,9 @@ async function runPassOnAct({
 
   const messages = buildPrompt(pass, {
     language: chapter.Series.language,
-    rawActText: act.rawActText || "",
-    pass1Analysis: act.pass1Analysis || "",
-    pass2Draft: act.pass2Draft || "",
+    rawActText: act.rawText || "",
+    pass1Analysis: act.anatomyProfile?.legacyAnalysis || "",
+    pass2Draft: act.anatomyProfile?.draftTranslation || "",
     glossaryText,
   });
 
@@ -277,15 +261,16 @@ async function runPassOnAct({
     };
   }
 
+  const profile = act.anatomyProfile || {};
   if (pass === 1) {
-    act.pass1Analysis = content;
-    act.currentPass = "pass1_done";
+    act.anatomyProfile = { ...profile, legacyAnalysis: content };
+    act.status = "processing";
   } else if (pass === 2) {
-    act.pass2Draft = content;
-    act.currentPass = "pass2_done";
+    act.anatomyProfile = { ...profile, draftTranslation: content };
+    act.status = "processing";
   } else {
-    act.pass3Final = content;
-    act.currentPass = "pass3_done";
+    act.translation = content;
+    act.status = "ready";
   }
 
   act.lastRunAt = new Date();
@@ -303,9 +288,9 @@ async function runPassOnAct({
   await act.save();
 
   const chapterStatus =
-    pass === 1 ? "pass1_done" : pass === 2 ? "pass2_done" : "pass3_done";
+    pass === 1 ? "processing" : pass === 2 ? "processing" : "ready";
   await Chapter.update(
-    { translationStatus: chapterStatus, lastTranslatedAt: new Date() },
+    { status: chapterStatus },
     { where: { id: act.chapterId } },
   );
 
@@ -339,7 +324,7 @@ router.get("/translate/:seriesId/chapter/:chapterId", async (req, res) => {
 
     const chapter = await Chapter.findByPk(chapterId, {
       include: [
-        { model: Series, attributes: ["id", "title", "language", "genre"] },
+        { model: Series, as: 'Series', attributes: ["id", "title", "language", "genre"] },
       ],
     });
 
@@ -356,16 +341,15 @@ router.get("/translate/:seriesId/chapter/:chapterId", async (req, res) => {
     const acts = await Act.findAll({
       where: { chapterId },
       order: [
-        ["order", "ASC"],
-        ["splitIndex", "ASC"],
+        ["sequence", "ASC"]
       ],
     });
 
     const progress = {
       totalActs: acts.length,
-      pass1Done: acts.filter((act) => !!act.pass1Analysis).length,
-      pass2Done: acts.filter((act) => !!act.pass2Draft).length,
-      pass3Done: acts.filter((act) => !!act.pass3Final).length,
+      pass1Done: acts.filter((act) => Boolean(act.anatomyProfile?.legacyAnalysis)).length,
+      pass2Done: acts.filter((act) => Boolean(act.anatomyProfile?.draftTranslation)).length,
+      pass3Done: acts.filter((act) => Boolean(act.translation)).length,
     };
 
     res.status(200).json({
@@ -441,8 +425,7 @@ router.post("/chapters/:chapterId/pass", async (req, res) => {
     const acts = await Act.findAll({
       where: { chapterId },
       order: [
-        ["order", "ASC"],
-        ["splitIndex", "ASC"],
+        ["sequence", "ASC"]
       ],
     });
 
@@ -481,8 +464,7 @@ router.post("/chapters/:chapterId/pass", async (req, res) => {
     const refreshedActs = await Act.findAll({
       where: { chapterId },
       order: [
-        ["order", "ASC"],
-        ["splitIndex", "ASC"],
+        ["sequence", "ASC"]
       ],
     });
 
@@ -516,23 +498,31 @@ router.patch("/acts/:actId", async (req, res) => {
       return res.status(400).json({ error: "Invalid actId" });
     }
 
-    const { pass2Draft, pass3Final, rawActText } = req.body;
+    const { draftTranslation, translation, rawText } = req.body;
 
     const act = await Act.findByPk(actId);
     if (!act) {
       return res.status(404).json({ error: `Act ${actId} not found` });
     }
 
-    if (rawActText !== undefined) {
-      act.rawActText = rawActText;
+    if (rawText !== undefined) {
+      act.rawText = rawText;
     }
-    if (pass2Draft !== undefined) {
-      act.pass2Draft = pass2Draft;
-      act.currentPass = "pass2_done";
+    const profile = act.anatomyProfile || {};
+    let saveProfile = false;
+    
+    if (draftTranslation !== undefined) {
+      profile.draftTranslation = draftTranslation;
+      saveProfile = true;
+      act.status = "processing";
     }
-    if (pass3Final !== undefined) {
-      act.pass3Final = pass3Final;
-      act.currentPass = "pass3_done";
+    if (saveProfile) {
+      act.anatomyProfile = profile;
+    }
+    
+    if (translation !== undefined) {
+      act.translation = translation;
+      act.status = "ready";
     }
 
     act.lastRunAt = new Date();

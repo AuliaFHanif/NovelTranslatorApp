@@ -4,8 +4,7 @@ const {
   normalizeLineBreaksAndHtml,
 } = require("../services/paragraphNormalizer");
 const { callSegmentationAI } = require("../services/aiSegmentation");
-const { fallbackSegmentation } = require("../services/fallbackSegmentation");
-const { createActs } = require("../services/actCreation");
+const actCreationService = require("../services/actCreation");
 
 function getCoverageDiagnostics(paragraphs, boundaries) {
   const lastBoundary =
@@ -46,7 +45,7 @@ async function runArchitectPhase(req, res) {
       return res.status(400).json({ error: "No raw text" });
     }
 
-    await chapter.update({ status: "architect" });
+    await chapter.update({ status: "processing" });
 
     await Act.destroy({ where: { chapterId } });
 
@@ -56,16 +55,12 @@ async function runArchitectPhase(req, res) {
       throw new Error("No paragraphs could be extracted from chapter text");
     }
 
-    let segmentation;
-    try {
-      segmentation = await callSegmentationAI(paragraphs);
-    } catch (error) {
-      console.error("AI segmentation failed, using fallback:", error.message);
-      segmentation = fallbackSegmentation(paragraphs);
-    }
+    const segmentation = await callSegmentationAI(paragraphs);
 
     if (paragraphs.length > 1 && segmentation.boundaries.length < 2) {
-      segmentation = fallbackSegmentation(paragraphs);
+      throw new Error(
+        "Pass 1 segmentation failed quality check: expected at least 2 boundaries for multi-paragraph chapter",
+      );
     }
 
     const coverageDiagnostics = getCoverageDiagnostics(
@@ -73,11 +68,10 @@ async function runArchitectPhase(req, res) {
       segmentation.boundaries,
     );
 
-    const acts = await createActs(
+    const acts = await actCreationService.createActs(
       chapterId,
       paragraphs,
-      segmentation,
-      normalizedSourceText,
+      segmentation
     );
 
     await chapter.update({ status: "ready" });
@@ -91,11 +85,8 @@ async function runArchitectPhase(req, res) {
       acts: acts.map((act) => ({
         id: act.id,
         label: act.label,
-        order: act.order,
-        splitIndex: act.splitIndex,
-        tokenCount: act.tokenCount,
-        status: act.status,
-        dependsOn: act.dependsOnActId,
+        sequence: act.sequence,
+        status: act.status
       })),
     });
   } catch (error) {
@@ -104,7 +95,7 @@ async function runArchitectPhase(req, res) {
       error.message,
     );
     if (chapter) {
-      await chapter.update({ status: "paste" });
+      await chapter.update({ status: "pending" });
     }
     return res.status(500).json({ error: error.message });
   }
