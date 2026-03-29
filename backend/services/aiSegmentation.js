@@ -1,4 +1,5 @@
 const OpenAI = require("openai");
+const { estimateTokens } = require("./paragraphNormalizer");
 
 function normalizeBaseUrl(url) {
   const base = (url || "http://localhost:1234").replace(/\/+$/, "");
@@ -110,8 +111,8 @@ function smoothBoundaries(boundaries, paragraphs) {
     .filter((v) => Number.isInteger(v) && v >= 1 && v <= maxParagraph)
     .sort((a, b) => a - b);
 
-  const MIN_PARAGRAPHS_PER_ACT =
-    Number(process.env.MIN_PARAGRAPHS_PER_ACT) || 2;
+  const MIN_TOKENS_PER_ACT =
+    Number(process.env.MIN_ACT_TOKENS) || 400;
   const adjusted = [];
 
   for (const rawBoundary of normalized) {
@@ -156,17 +157,24 @@ function smoothBoundaries(boundaries, paragraphs) {
 
   const dedupedAdjusted = [...new Set(adjusted)].sort((a, b) => a - b);
 
-  // Avoid over-fragmenting into tiny acts unless this is the final segment.
-  const minSpan = Math.max(1, MIN_PARAGRAPHS_PER_ACT);
+  // Avoid over-fragmenting into tiny acts by accumulating tokens.
   const spanFiltered = [];
   let lastBoundary = 0;
+  let accumulatedTokens = 0;
 
   for (const boundary of dedupedAdjusted) {
-    const span = boundary - lastBoundary;
+    let spanTokens = 0;
+    for (let i = lastBoundary; i < boundary; i++) {
+        const text = paragraphs[i]?.text || "";
+        spanTokens += estimateTokens(text);
+    }
+    accumulatedTokens += spanTokens;
+
     const isFinal = boundary === maxParagraph;
-    if (isFinal || span >= minSpan) {
+    if (isFinal || accumulatedTokens >= MIN_TOKENS_PER_ACT) {
       spanFiltered.push(boundary);
       lastBoundary = boundary;
+      accumulatedTokens = 0;
     }
   }
 

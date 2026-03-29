@@ -74,6 +74,10 @@ class ActCreationService {
 
   splitAct(actText, paragraphs) {
     const splits = [];
+    const totalTokens = this.estimateTokens(actText);
+    const numSplits = Math.ceil(totalTokens / this.MAX_TOKENS);
+    const targetTokens = Math.ceil(totalTokens / numSplits);
+    
     let currentText = '';
     let currentTokens = 0;
     let splitIndex = 0;
@@ -82,7 +86,7 @@ class ActCreationService {
     for (const para of paragraphs) {
       const paraTokens = this.estimateTokens(para.text);
 
-      if (currentTokens + paraTokens > this.MAX_TOKENS && currentText.length > 0) {
+      if (currentTokens + paraTokens > targetTokens && currentText.length > 0 && splitIndex < numSplits - 1) {
         splits.push({
           text: currentText.trim(),
           label: alphabet[splitIndex++]
