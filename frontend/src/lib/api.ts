@@ -88,21 +88,19 @@ export interface TermAppearance {
   extractedAt: string;
 }
 
-export interface DetailedGlossaryTerm extends GlossaryTerm {
-  appearancesCount?: number;
-  TermAppearances?: Array<TermAppearance & {
-    Act?: {
-      id: number;
-      label: string;
-      sequence: number;
-      Chapter?: {
-        number: number;
-        title: string;
-      }
-    }
+export interface GlossaryCandidate {
+  term: string;
+  type: string;
+  proposedTranslation: string;
+  confidence: number;
+  existingId: number | null;
+  appearances: Array<{
+    actId: number;
+    actLabel: string;
+    context: string;
+    confidence: number;
   }>;
 }
-
 
 export interface AnalysisResult {
   success: boolean;
@@ -115,7 +113,7 @@ export interface AnalysisResult {
     appearances: number;
   };
   pendingGlossary: number;
-  terms?: DetailedGlossaryTerm[];
+  terms?: GlossaryCandidate[];
 }
 
 
@@ -331,6 +329,52 @@ export async function getTranslationChapter(
   return result.data;
 }
 
+export async function streamActTranslation(
+  actId: number,
+  model: string,
+  onChunk: (text: string) => void,
+): Promise<void> {
+  const url = `${API_BASE_URL}/translation/acts/${actId}/stream?model=${encodeURIComponent(model)}`;
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error(`Failed to start stream: ${response.statusText}`);
+  }
+
+  const reader = response.body?.getReader();
+  const decoder = new TextDecoder();
+
+  if (!reader) return;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split("\n");
+
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const dataStr = line.slice(6).trim();
+          if (dataStr === "[DONE]") continue;
+
+          try {
+            const data = JSON.parse(dataStr);
+            if (data.content) {
+              onChunk(data.content);
+            }
+          } catch (e) {
+            // Partial chunk or parse error
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export async function runActPass(
   actId: number,
   pass: 1 | 2 | 3,
@@ -426,10 +470,14 @@ export async function runChapterAnalysis(
 }
 
 export async function getSeriesGlossaryDetailed(seriesId: number): Promise<GlossaryTerm[]> {
-  const result = await requestJson<ApiListResponse<GlossaryTerm>>(`/series/${seriesId}/glossary/detailed`);
-  // Handle variations in backend response format (sometimes wrapped in data, sometimes just array)
+  const result = await requestJson<any>(`/series/${seriesId}/glossary/detailed`);
+  
   if (Array.isArray(result)) return result;
-  return result.data || [];
+  
+  // The backend might return { success: true, data: { entries: [...] } } 
+  // OR might return a direct list response.
+  const data = result.data || result;
+  return data.entries || (Array.isArray(data) ? data : []);
 }
 
 export async function updateGlossaryTerm(
@@ -445,6 +493,20 @@ export async function updateGlossaryTerm(
     {
       method: "PUT",
       body: JSON.stringify(payload),
+    }
+  );
+  return result.data;
+}
+
+export async function bulkApproveTerms(
+  seriesId: number,
+  terms: Array<Partial<GlossaryCandidate> & { termEn: string }>
+): Promise<{ created: number, updated: number, appearances: number }> {
+  const result = await requestJson<ApiItemResponse<{ created: number, updated: number, appearances: number }>>(
+    `/series/${seriesId}/glossary/bulk-approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({ terms }),
     }
   );
   return result.data;

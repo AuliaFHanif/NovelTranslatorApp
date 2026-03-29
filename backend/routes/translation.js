@@ -76,15 +76,30 @@ function formatGlossary(entries, language) {
     .join("\n");
 }
 
-async function collectGlossaryForAct(chapter, actId) {
-  const entries = await GlossaryTerm.findAll({
+async function collectGlossaryForAct(chapter, act) {
+  const allApproved = await GlossaryTerm.findAll({
     where: {
-      seriesId: chapter.seriesId
+      seriesId: chapter.seriesId,
+      status: "approved"
     },
     order: [["updatedAt", "DESC"]],
   });
 
-  return entries;
+  if (!act.rawText || !allApproved.length) {
+    return [];
+  }
+
+  // Filter ONLY terms that actually appear in the act's source text
+  const termField = chapter.Series?.language === "ja" ? "termJa" : "termZh";
+  const relevanceFilter = allApproved.filter(term => {
+    const sourceString = term[termField] || term.canonicalForm;
+    if (!sourceString) return false;
+    
+    // Exact match case-sensitive for source languages is best
+    return act.rawText.includes(sourceString);
+  });
+
+  return relevanceFilter;
 }
 
 async function aggregateChapterFinalText(chapterId) {
@@ -113,36 +128,21 @@ async function aggregateChapterFinalText(chapterId) {
   await chapter.save();
 }
 
-async function runPassOnAct({
-  act,
-  pass,
-  force,
-  model,
-  temperature,
-  top_p,
-  max_tokens,
-}) {
+async function prepareActTranslationContext(act, model) {
   const chapter = await Chapter.findByPk(act.chapterId, {
     include: [{ model: Series, as: 'Series', attributes: ["id", "language", "title"] }],
   });
 
   if (!chapter) {
-    return {
-      status: 404,
-      body: { error: `Chapter ${act.chapterId} not found` },
-    };
+    throw new Error(`Chapter ${act.chapterId} not found`);
   }
 
-  const readiness = canRunPass(act, pass, force);
-  if (!readiness.ok) {
-    return { status: 409, body: { error: readiness.reason } };
-  }
-
-  const glossaryEntries = await collectGlossaryForAct(chapter, act.id);
+  const glossaryEntries = await collectGlossaryForAct(chapter, act);
   const glossaryText = formatGlossary(glossaryEntries, chapter.Series.language);
 
-  // Build analysis context from Lexicographer data if available
-  let analysisContext = "";
+  // EXPLICIT ACT CONTEXT
+  let analysisContext = `Current Position: Chapter ${chapter.number} | Act ${act.sequence} - ${act.label}\n\n`;
+  
   const linguistic = act.anatomyProfile?.linguistic;
   const narrative = act.anatomyProfile?.narrative;
   if (linguistic || narrative) {
@@ -166,19 +166,45 @@ async function runPassOnAct({
   });
 
   const resolvedModel = await resolveModel(model);
+  return { messages, resolvedModel, chapter };
+}
+
+async function runPassOnAct({
+  act,
+  pass,
+  force,
+  model,
+  temperature,
+  top_p,
+  max_tokens,
+}) {
+  const readiness = canRunPass(act, pass, force);
+  if (!readiness.ok) {
+    return { status: 409, body: { error: readiness.reason } };
+  }
+
+  let messages, resolvedModel, chapter;
+  try {
+    const context = await prepareActTranslationContext(act, model);
+    messages = context.messages;
+    resolvedModel = context.resolvedModel;
+    chapter = context.chapter;
+  } catch (err) {
+    return { status: 404, body: { error: err.message } };
+  }
 
   const llmRequest = {
     model: resolvedModel,
     messages,
     temperature: temperature ?? 0.4,
     top_p: top_p ?? 0.9,
-    max_tokens: max_tokens ?? 4096,
+    max_tokens: max_tokens ?? 8192,
   };
 
   let llmResponse;
   try {
     llmResponse = await axios.post(LM_STUDIO_CHAT_ENDPOINT, llmRequest, {
-      timeout: 300000,
+      timeout: 900000,
     });
   } catch (error) {
     if (error.code === "ECONNREFUSED") {
@@ -439,6 +465,87 @@ router.post("/chapters/:chapterId/pass", async (req, res) => {
   }
 });
 
+router.get("/acts/:actId/stream", async (req, res) => {
+  try {
+    const actId = Number(req.params.actId);
+    const model = req.query.model;
+    const act = await Act.findByPk(actId);
+    
+    if (!act) return res.status(404).json({ error: "Act not found" });
+
+    const { messages, resolvedModel } = await prepareActTranslationContext(act, model);
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const llmRequest = {
+      model: resolvedModel,
+      messages,
+      temperature: 0.4,
+      max_tokens: 8192,
+      stream: true
+    };
+
+    const response = await axios.post(LM_STUDIO_CHAT_ENDPOINT, llmRequest, {
+      responseType: 'stream'
+    });
+
+    let fullText = "";
+    
+    response.data.on('data', chunk => {
+      const raw = chunk.toString();
+      const lines = raw.split('\n');
+      
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        
+        const dataStr = trimmed.slice(6);
+        if (dataStr === '[DONE]') break;
+        
+        try {
+          const data = JSON.parse(dataStr);
+          const content = data.choices[0]?.delta?.content || "";
+          if (content) {
+            fullText += content;
+            res.write(`data: ${JSON.stringify({ content })}\n\n`);
+          }
+        } catch (e) {
+          // Ignore parse errors for incomplete chunks
+        }
+      }
+    });
+
+    response.data.on('end', async () => {
+      try {
+        const profile = act.anatomyProfile || {};
+        act.anatomyProfile = { ...profile, finalTranslation: fullText };
+        act.status = "ready";
+        await act.save();
+        await aggregateChapterFinalText(act.chapterId);
+      } catch (err) {
+        console.error("Failed to save streamed translation:", err);
+      }
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+
+    response.data.on('error', (err) => {
+      console.error("Stream error:", err);
+      res.end();
+    });
+
+  } catch (error) {
+    console.error("Streaming route error:", error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    } else {
+      res.end();
+    }
+  }
+});
+
 router.patch("/acts/:actId", async (req, res) => {
   try {
     const actId = Number(req.params.actId);
@@ -466,6 +573,7 @@ router.patch("/acts/:actId", async (req, res) => {
     }
     if (translation !== undefined) {
       profile.finalTranslation = translation;
+      profile.pass3Final = translation;
       saveProfile = true;
       act.status = "ready";
     }
@@ -477,7 +585,7 @@ router.patch("/acts/:actId", async (req, res) => {
     act.lastRunAt = new Date();
     await act.save();
 
-    if (pass3Final !== undefined) {
+    if (translation !== undefined) {
       await aggregateChapterFinalText(act.chapterId);
     }
 

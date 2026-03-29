@@ -9,41 +9,153 @@ class GlossaryProcessingService {
    * @param {Object} act - Act instance (with associations loaded)
    * @returns {Object} Stats { created, merged, appearances }
    */
-  async processTerms(extractedTerms, act) {
+  /**
+   * Identify terms and separate into "already approved" and "new candidates"
+   * 
+   * @param {Array} extractedTerms - From AI analysis
+   * @param {Object} act - Act instance
+   * @returns {Object} { candidates, approvedAppearances }
+   */
+  async identifyTerms(extractedTerms, act) {
     const seriesId = act.Chapter?.seriesId;
     const language = act.Chapter?.Series?.language;
-
-    const stats = { created: 0, merged: 0, appearances: 0 };
-    const processedTerms = [];
+    const candidates = [];
+    let approvedCount = 0;
 
     for (const extracted of extractedTerms) {
       try {
-        // 1. Find or create GlossaryTerm
-        const { term, isNew } = await this.findOrCreateTerm(extracted, seriesId, language);
+        // Normalize extracted data (handle potential AI property name variations)
+        const normalized = {
+          term: extracted.term || extracted.name || extracted.text || extracted.word,
+          type: extracted.type || 'term',
+          context: extracted.context || extracted.contextSentence || extracted.sentence || '',
+          proposedTranslation: extracted.proposedTranslation || extracted.translation || '',
+          confidence: typeof extracted.confidence === 'number' ? extracted.confidence : 0.8
+        };
 
-        if (isNew) {
-          stats.created++;
-        } else {
-          stats.merged++;
+        if (!normalized.term) {
+          console.warn(`[Phase 3] AI returned term without name/text. Skipping.`, extracted);
+          continue;
         }
 
-        // 2. Create TermAppearance (linking record - NEW SCHEMA!)
-        await this.recordAppearance(term.id, act.id, extracted);
-        stats.appearances++;
+        // 1. Check if term already exists and is approved
+        const existingTerm = await this.findExistingTerm(normalized, seriesId, language);
 
-        // 3. Add variants if different form
-        await this.handleVariants(term, extracted.term);
-
-        // Add to return list
-        processedTerms.push(term);
-
+        if (existingTerm && existingTerm.status === 'approved') {
+          // Record appearance immediately for approved terms
+          await this.recordAppearance(existingTerm.id, act.id, normalized);
+          approvedCount++;
+          
+          // Also handle variants for existing terms
+          await this.handleVariants(existingTerm, normalized.term);
+        } else {
+          // If not approved (unseen or pending), treat as candidate
+          candidates.push({
+            ...normalized,
+            existingId: existingTerm?.id || null,
+            actId: act.id,
+            actLabel: act.label
+          });
+        }
       } catch (err) {
-        console.error(`Failed to process term "${extracted.term}":`, err.message);
-        // Continue with other terms
+        console.error(`Failed to identify term:`, err.message);
       }
     }
 
-    return { ...stats, terms: processedTerms };
+    return { candidates, approvedCount };
+  }
+
+  /**
+   * Find an existing term by various matching strategies
+   */
+  async findExistingTerm(extracted, seriesId, language) {
+    const termField = language === 'ja' ? 'termJa' : 'termZh';
+
+    // Try exact match
+    let term = await GlossaryTerm.findOne({
+      where: {
+        seriesId,
+        [termField]: extracted.term,
+        type: extracted.type
+      }
+    });
+
+    // Try canonical form
+    if (!term) {
+      term = await GlossaryTerm.findOne({
+        where: {
+          seriesId,
+          canonicalForm: extracted.term,
+          type: extracted.type
+        }
+      });
+    }
+
+    // Try variant matching
+    if (!term) {
+      term = await this.findByVariant(extracted.term, seriesId, extracted.type);
+    }
+
+    return term;
+  }
+
+  /**
+   * Process and save a batch of approved candidates
+   */
+  async handleBulkApproval(approvedItems, seriesId, language) {
+    const results = { created: 0, updated: 0, appearances: 0 };
+    const termField = language === 'ja' ? 'termJa' : 'termZh';
+
+    for (const item of approvedItems) {
+      try {
+        let term;
+        if (item.existingId) {
+          term = await GlossaryTerm.findByPk(item.existingId);
+          if (term) {
+            await term.update({
+              termEn: item.termEn || item.proposedTranslation, // User edited or AI proposed
+              status: 'approved',
+              confidence: item.confidence,
+              approvedAt: new Date()
+            });
+            results.updated++;
+          }
+        }
+
+        if (!term) {
+          // Create new approved term
+          term = await GlossaryTerm.create({
+            seriesId,
+            canonicalForm: item.term,
+            [termField]: item.term,
+            termEn: item.termEn || item.proposedTranslation,
+            type: item.type,
+            metadata: { variants: [] },
+            confidence: item.confidence,
+            status: 'approved',
+            approvedAt: new Date()
+          });
+          results.created++;
+        }
+
+        // Record all appearances for this term
+        // The item might have multiple appearances if we aggregated them, 
+        // but for now the frontend sends them 1-by-1 or we can handle an array
+        const appearances = item.appearances || [item];
+        for (const app of appearances) {
+          await this.recordAppearance(term.id, app.actId, app);
+          results.appearances++;
+        }
+
+        // Handle variants
+        await this.handleVariants(term, item.term);
+
+      } catch (err) {
+        console.error(`Failed to approve candidate "${item.term}":`, err.message);
+      }
+    }
+
+    return results;
   }
 
   async findOrCreateTerm(extracted, seriesId, language) {

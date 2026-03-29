@@ -6,7 +6,8 @@ class CombinedAnalysisService {
   constructor() {
     this.client = new OpenAI({
       baseURL: process.env.LM_STUDIO_URL || 'http://localhost:1234/v1',
-      apiKey: 'lm-studio'
+      apiKey: 'lm-studio',
+      timeout: 900000 // 15 minutes for heavy analysis
     });
   }
 
@@ -65,9 +66,17 @@ class CombinedAnalysisService {
   buildSystemPrompt(language, series) {
     const base = `You are a literary analysis engine for ${language === 'ja' ? 'Japanese' : 'Chinese'} web novels.`;
 
+    const common = `
+NAMING CONVENTION (CRITICAL):
+- For all "character" and "location" types, the "proposedTranslation" MUST be phonetic transliteration.
+- For Chinese: Use Pinyin without tone marks (e.g., "白枫" -> "Bai Feng").
+- For Japanese: Use Romaji (e.g., "田中" -> "Tanaka").
+- Do NOT translate names literally (e.g., "白枫" is NOT "White Maple").
+`;
+
     if (language === 'ja') {
       return `${base}
-
+${common}
 Analyze for:
 1. SOV structure - verb-last suspense
 2. Pro-drop frequency - invisible agency
@@ -76,11 +85,11 @@ Analyze for:
 5. Taigen-tome - noun-ending objectification
 6. Maru-kakko () - unuttered internal thoughts
 
-Series: ${series.title}
+Series: ${series.title || 'Novel'}
 Genre: ${series.genre || 'Unknown'}`;
     } else {
       return `${base}
-
+${common}
 Analyze for:
 1. Topic-Comment structure - foregrounding
 2. Face (面子) system - shame/honor dynamics
@@ -89,7 +98,7 @@ Analyze for:
 5. Four-character idioms (成语) - cultural weight
 6. Jianghu elements - martial arts cultivation
 
-Series: ${series.title}
+Series: ${series.title || 'Novel'}
 Genre: ${series.genre || 'Unknown'}`;
     }
   }
@@ -114,7 +123,17 @@ Genre: ${series.genre || 'Unknown'}`;
 
 ${truncated}
 
-Extract glossary terms and provide full analysis.`;
+### TERM EXTRACTION POLICY (STRICT!)
+1. PRIORITIZE:
+   - Character Names (Use phonetic names only - "Bai Feng" not "White Maple")
+   - Organization Names (Sects, guilds, clans)
+   - Unique Location Names (Distinct nouns)
+   - Unique World Terms (Magic items, techniques)
+2. EXCLUDE:
+   - General dictionary terms (e.g., "running", "house", "angry", "sword").
+3. FORMATTING:
+   - The "term" field must be the EXACT source text from the novel.
+   - Do NOT add explanations or phonetic romaji inside the "term" field.`;
   }
 }
 

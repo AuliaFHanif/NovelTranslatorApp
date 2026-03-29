@@ -230,7 +230,7 @@ module.exports = {
         comment: 'English translation (REQUIRED)'
       },
       type: {
-        type: Sequelize.ENUM('character', 'location', 'item', 'concept', 'technique'),
+        type: Sequelize.ENUM('character', 'organization', 'location', 'item', 'concept', 'technique'),
         allowNull: false,
         comment: 'Category of the term'
       },

@@ -18,7 +18,7 @@ const japaneseSchema = {
             type: 'object',
             properties: {
               term: { type: 'string' },
-              type: { enum: ['character', 'location', 'item', 'concept', 'technique'] },
+              type: { enum: ['character', 'location', 'organization', 'item', 'concept', 'technique'] },
               context: { type: 'string' },
               proposedTranslation: { type: 'string' },
               confidence: { type: 'number', minimum: 0, maximum: 1 }
@@ -174,7 +174,7 @@ const chineseSchema = {
             type: 'object',
             properties: {
               term: { type: 'string' },
-              type: { enum: ['character', 'location', 'item', 'concept', 'technique'] },
+              type: { enum: ['character', 'location', 'organization', 'item', 'concept', 'technique'] },
               context: { type: 'string' },
               proposedTranslation: { type: 'string' },
               confidence: { type: 'number', minimum: 0, maximum: 1 }

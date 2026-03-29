@@ -17,6 +17,9 @@ router.get('/series/:seriesId/glossary/pending-count', lexicographerController.g
 // Update glossary entry (approve/reject)
 router.put('/glossary-terms/:termId', lexicographerController.updateGlossaryTerm);
 
+// Bulk approve candidates
+router.post('/series/:seriesId/glossary/bulk-approve', lexicographerController.bulkApprove);
+
 // Get act analysis
 router.get('/acts/:actId/analysis', lexicographerController.getActAnalysis);
 

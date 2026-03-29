@@ -16,14 +16,14 @@ import {
   LLM_PROXY_ENDPOINT,
   runArchitectPhase,
   runChapterAnalysis,
-  runActPass,
+  streamActTranslation,
   runChapterPass,
   updateAct,
   deleteAllActs,
   type Act,
   type AIModel,
   type TranslationChapter,
-  type DetailedGlossaryTerm,
+  type GlossaryCandidate,
 } from "../lib/api";
 import { showError, showInfo, showSuccess } from "../lib/notifications";
 import { GlossaryApprovalDialog } from "../components/GlossaryApprovalDialog";
@@ -43,7 +43,7 @@ export function Translation() {
   const [apiStatus, setApiStatus] = useState<
     "idle" | "testing" | "ok" | "error"
   >("idle");
-  const [extractedTerms, setExtractedTerms] = useState<DetailedGlossaryTerm[]>([]);
+  const [extractedTerms, setExtractedTerms] = useState<GlossaryCandidate[]>([]);
   const [isGlossaryDialogOpen, setIsGlossaryDialogOpen] = useState(false);
 
   const seriesId = Number(searchParams.get("seriesId") || "0");
@@ -155,9 +155,12 @@ export function Translation() {
 
     try {
       setIsRunningPass(true);
-      await runActPass(selectedAct.id, 3, {
-        model: modelName,
+      setEditableTranslation(""); // Clear before streaming
+      
+      await streamActTranslation(selectedAct.id, modelName, (chunk) => {
+        setEditableTranslation((prev) => prev + chunk);
       });
+
       await loadTranslationChapter();
       await showSuccess(
         "Translation Completed",
@@ -423,6 +426,12 @@ export function Translation() {
             >
               REFRESH
             </Button>
+            <Link
+              to={`/contextLibrary?seriesId=${seriesId}`}
+              className="flex items-center justify-center border border-[#d8cdbd] text-[#a0908b] h-8 text-[9px] tracking-widest rounded-sm px-4 hover:bg-[#f2eadc] hover:text-[#4A3D39] bg-transparent font-sans uppercase no-underline transition-colors"
+            >
+              GLOSSARY
+            </Link>
             <Button
               variant="outline"
               onClick={() => void handleDeleteAllActs()}

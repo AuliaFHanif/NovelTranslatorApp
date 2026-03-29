@@ -49,38 +49,32 @@ class LexicographerController {
         terms: [] // Track unique terms for the frontend to approve
       };
 
-      const termMap = new Map(); // Use ID to deduplicate
+        const allCandidates = [];
 
+        // Sort by sequence to ensure order
+        const sortedActs = chapter.Acts.sort((a, b) => a.sequence - b.sequence);
 
-      // Sort by sequence to ensure order
-      const sortedActs = chapter.Acts.sort((a, b) => a.sequence - b.sequence);
+        for (const act of sortedActs) {
+          try {
+            console.log(`[Phase 3] Analyzing act ${act.label} (${act.id})`);
 
-      for (const act of sortedActs) {
-        try {
-          console.log(`[Phase 3] Analyzing act ${act.label} (${act.id})`);
+            // Ensure act has access to parent Chapter/Series for analysis context
+            act.Chapter = chapter;
 
-          // Ensure act has access to parent Chapter/Series for analysis context
-          act.Chapter = chapter;
+            // Run AI analysis with explicit model
+            const analysis = await combinedAnalysis.analyzeAct(act, { model });
 
-          // Run AI analysis with explicit model
-          const analysis = await combinedAnalysis.analyzeAct(act, { model });
+            // Identify terms (approved vs candidates)
+            const { candidates, approvedCount } = await glossaryProcessing.identifyTerms(
+              analysis.extractedTerms || [],
+              act
+            );
 
-          // Process glossary terms (uses TermAppearances table)
-          const glossaryStats = await glossaryProcessing.processTerms(
-            analysis.extractedTerms || [],
-            act
-          );
+            results.glossary.appearances += (analysis.extractedTerms?.length || 0);
+            results.glossary.merged += approvedCount;
 
-          results.glossary.created += glossaryStats.created;
-          results.glossary.merged += glossaryStats.merged;
-          results.glossary.appearances += glossaryStats.appearances;
-
-          // Track newly processed terms for final response
-          if (glossaryStats.terms) {
-            glossaryStats.terms.forEach(t => {
-              termMap.set(t.id, t);
-            });
-          }
+            // Collect candidates
+            allCandidates.push(...candidates);
 
           // Update act with analysis and strategy
           await act.update({
@@ -122,26 +116,61 @@ class LexicographerController {
         results.chapterStrategy = chapterStrategy;
       }
 
-      // Convert term map back to list for response
-      results.terms = Array.from(termMap.values());
+        // 4. Aggregated candidates (deduplicated by term text and type)
+        const candidateMap = new Map();
+        for (const cand of allCandidates) {
+          // Robust normalization for key: trim, case-insensitive mapping
+          const termKey = String(cand.term || '').trim();
+          const typeKey = String(cand.type || 'term').trim();
+          const key = `${termKey}|${typeKey}`.toLowerCase();
 
-
-      // 4. Count pending glossary for response
-      const pendingGlossary = await GlossaryTerm.count({
-        where: {
-          seriesId: chapter.seriesId,
-          status: 'pending'
+          if (!candidateMap.has(key)) {
+            candidateMap.set(key, {
+              ...cand,
+              term: termKey, // Use trimmed version
+              appearances: [
+                {
+                  actId: cand.actId,
+                  actLabel: cand.actLabel,
+                  context: cand.context,
+                  confidence: cand.confidence
+                }
+              ]
+            });
+          } else {
+            const existing = candidateMap.get(key);
+            existing.appearances.push({
+              actId: cand.actId,
+              actLabel: cand.actLabel,
+              context: cand.context,
+              confidence: cand.confidence
+            });
+            // Keep highest confidence for the main record
+            if (cand.confidence > (existing.confidence || 0)) {
+              existing.confidence = cand.confidence;
+              existing.proposedTranslation = cand.proposedTranslation;
+            }
+          }
         }
-      });
 
-      res.json({
-        success: true,
-        data: {
-          chapterId: parseInt(chapterId),
-          ...results,
-          pendingGlossary
-        }
-      });
+        results.terms = Array.from(candidateMap.values());
+
+        // 4. Count pending glossary for response
+        const pendingGlossary = await GlossaryTerm.count({
+          where: {
+            seriesId: chapter.seriesId,
+            status: 'pending'
+          }
+        });
+
+        res.json({
+          success: true,
+          data: {
+            chapterId: parseInt(chapterId),
+            ...results,
+            pendingGlossary
+          }
+        });
 
     } catch (err) {
       console.error('[Phase 3] Controller error:', err);
@@ -345,6 +374,40 @@ class LexicographerController {
           seriesId: parseInt(seriesId),
           pendingCount: count
         }
+      });
+
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  /**
+   * Bulk approve candidates
+   * POST /api/series/:seriesId/glossary/bulk-approve
+   */
+  async bulkApprove(req, res) {
+    const { seriesId } = req.params;
+    const { terms } = req.body;
+
+    try {
+      const series = await Series.findByPk(seriesId);
+      if (!series) {
+        return res.status(404).json({ error: 'Series not found' });
+      }
+
+      if (!terms || !Array.isArray(terms)) {
+        return res.status(400).json({ error: 'Terms array is required' });
+      }
+
+      const results = await glossaryProcessing.handleBulkApproval(
+        terms,
+        seriesId,
+        series.language
+      );
+
+      res.json({
+        success: true,
+        data: results
       });
 
     } catch (err) {
