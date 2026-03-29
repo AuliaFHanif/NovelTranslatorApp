@@ -2,12 +2,12 @@ const express = require("express");
 const axios = require("axios");
 const { Act, Chapter, Series, GlossaryTerm } = require("../models");
 const { Op } = require("sequelize");
+const { resolveModel } = require("../services/resolveModel");
 
 const router = express.Router();
 
 const LM_STUDIO_URL = process.env.LM_STUDIO_URL || "http://localhost:1234";
 const LM_STUDIO_CHAT_ENDPOINT = `${LM_STUDIO_URL}/v1/chat/completions`;
-const DEFAULT_MODEL = process.env.LM_STUDIO_MODEL || "local-model";
 
 function parsePass(value) {
   const parsed = Number(value);
@@ -17,100 +17,42 @@ function parsePass(value) {
   return parsed;
 }
 
-function canRunPass(act, pass, force) {
-  if (force) {
-    return { ok: true };
-  }
-
-  if (pass === 2 && !act.pass1Analysis) {
-    return { ok: false, reason: "Pass 1 must be completed before Pass 2" };
-  }
-
-  if (pass === 3 && !act.pass2Draft) {
-    return { ok: false, reason: "Pass 2 must be completed before Pass 3" };
-  }
-
+function canRunPass() {
   return { ok: true };
 }
 
-function buildPrompt(
-  pass,
-  { language, rawActText, pass1Analysis, pass2Draft, glossaryText },
+function buildTranslationPrompt(
+  { language, rawActText, glossaryText, analysisContext },
 ) {
   const languageName = language === "ja" ? "Japanese" : "Chinese";
 
-  if (pass === 1) {
-    return [
-      {
-        role: "system",
-        content:
-          "You are a literary translation analyst. Produce concise analysis notes for translation quality.",
-      },
-      {
-        role: "user",
-        content: [
-          `Source language: ${languageName}`,
-          glossaryText
-            ? `Glossary context:\n${glossaryText}`
-            : "Glossary context: none",
-          "Task: Analyze tone, voice, idioms, culture-specific references, and translation risks.",
-          "Return clear bullet points only.",
-          "Source text:",
-          rawActText,
-        ].join("\n\n"),
-      },
-    ];
+  const userParts = [
+    `Source language: ${languageName}`,
+  ];
+
+  if (glossaryText) {
+    userParts.push(`Glossary (use these translations for names/terms):\n${glossaryText}`);
   }
 
-  if (pass === 2) {
-    return [
-      {
-        role: "system",
-        content:
-          "You are a literary translator. Produce a faithful but natural English draft translation.",
-      },
-      {
-        role: "user",
-        content: [
-          `Source language: ${languageName}`,
-          glossaryText
-            ? `Glossary context:\n${glossaryText}`
-            : "Glossary context: none",
-          pass1Analysis
-            ? `Pass 1 analysis notes:\n${pass1Analysis}`
-            : "Pass 1 analysis notes: none",
-          "Task: Translate into English preserving intent, names, and tone.",
-          "Return only the translation text.",
-          "Source text:",
-          rawActText,
-        ].join("\n\n"),
-      },
-    ];
+  if (analysisContext) {
+    userParts.push(`Literary analysis context:\n${analysisContext}`);
   }
+
+  userParts.push(
+    "Task: Translate the following text into natural, faithful English. Preserve character voice, narrative tone, cultural nuance, and proper names. Return only the translated text.",
+    "Source text:",
+    rawActText,
+  );
 
   return [
     {
       role: "system",
       content:
-        "You are a literary editor. Polish translation for readability while preserving meaning.",
+        "You are an expert literary translator specializing in translating web novels. Produce faithful, natural English translations that preserve the author's voice, tone, and style.",
     },
     {
       role: "user",
-      content: [
-        `Source language: ${languageName}`,
-        glossaryText
-          ? `Glossary context:\n${glossaryText}`
-          : "Glossary context: none",
-        pass1Analysis
-          ? `Pass 1 analysis notes:\n${pass1Analysis}`
-          : "Pass 1 analysis notes: none",
-        "Task: Refine this draft translation and output final polished English text.",
-        "Return only the polished translation text.",
-        "Draft translation:",
-        pass2Draft || "",
-        "Source text (for reference):",
-        rawActText,
-      ].join("\n\n"),
+      content: userParts.join("\n\n"),
     },
   ];
 }
@@ -154,7 +96,7 @@ async function aggregateChapterFinalText(chapterId) {
   });
 
   const finalText = acts
-    .map((act) => (act.translation || "").trim())
+    .map((act) => (act.anatomyProfile?.finalTranslation || "").trim())
     .filter(Boolean)
     .join("\n\n");
 
@@ -165,7 +107,7 @@ async function aggregateChapterFinalText(chapterId) {
 
   chapter.finalText = finalText || null;
   chapter.status =
-    acts.length > 0 && acts.every((act) => act.translation)
+    acts.length > 0 && acts.every((act) => act.anatomyProfile?.finalTranslation)
       ? "ready"
       : chapter.status;
   await chapter.save();
@@ -199,26 +141,44 @@ async function runPassOnAct({
   const glossaryEntries = await collectGlossaryForAct(chapter, act.id);
   const glossaryText = formatGlossary(glossaryEntries, chapter.Series.language);
 
-  const messages = buildPrompt(pass, {
+  // Build analysis context from Lexicographer data if available
+  let analysisContext = "";
+  const linguistic = act.anatomyProfile?.linguistic;
+  const narrative = act.anatomyProfile?.narrative;
+  if (linguistic || narrative) {
+    const parts = [];
+    if (narrative?.primaryEmotion) parts.push(`Primary emotion: ${narrative.primaryEmotion}`);
+    if (narrative?.emotionalIntensity) parts.push(`Emotional intensity: ${narrative.emotionalIntensity}`);
+    if (narrative?.pacingPattern) parts.push(`Pacing: ${narrative.pacingPattern}`);
+    if (linguistic?.sentenceStructure) parts.push(`Sentence structure: ${linguistic.sentenceStructure}`);
+    if (linguistic?.honorifics?.density) parts.push(`Honorific density: ${linguistic.honorifics.density}`);
+    if (linguistic?.onomatopoeia?.density) parts.push(`Onomatopoeia density: ${linguistic.onomatopoeia.density}`);
+    if (narrative?.emotionalTone?.enryo) parts.push("Enryo (restraint/reserve) present");
+    if (narrative?.emotionalTone?.amae) parts.push("Amae (dependence/indulgence) present");
+    if (parts.length > 0) analysisContext = parts.join("\n");
+  }
+
+  const messages = buildTranslationPrompt({
     language: chapter.Series.language,
     rawActText: act.rawText || "",
-    pass1Analysis: act.anatomyProfile?.legacyAnalysis || "",
-    pass2Draft: act.anatomyProfile?.draftTranslation || "",
     glossaryText,
+    analysisContext,
   });
 
+  const resolvedModel = await resolveModel(model);
+
   const llmRequest = {
-    model: model || DEFAULT_MODEL,
+    model: resolvedModel,
     messages,
     temperature: temperature ?? 0.4,
     top_p: top_p ?? 0.9,
-    max_tokens: max_tokens ?? 2048,
+    max_tokens: max_tokens ?? 4096,
   };
 
   let llmResponse;
   try {
     llmResponse = await axios.post(LM_STUDIO_CHAT_ENDPOINT, llmRequest, {
-      timeout: 60000,
+      timeout: 300000,
     });
   } catch (error) {
     if (error.code === "ECONNREFUSED") {
@@ -262,16 +222,8 @@ async function runPassOnAct({
   }
 
   const profile = act.anatomyProfile || {};
-  if (pass === 1) {
-    act.anatomyProfile = { ...profile, legacyAnalysis: content };
-    act.status = "processing";
-  } else if (pass === 2) {
-    act.anatomyProfile = { ...profile, draftTranslation: content };
-    act.status = "processing";
-  } else {
-    act.translation = content;
-    act.status = "ready";
-  }
+  act.anatomyProfile = { ...profile, finalTranslation: content };
+  act.status = "ready";
 
   act.lastRunAt = new Date();
   act.llmMeta = {
@@ -287,16 +239,12 @@ async function runPassOnAct({
 
   await act.save();
 
-  const chapterStatus =
-    pass === 1 ? "processing" : pass === 2 ? "processing" : "ready";
   await Chapter.update(
-    { status: chapterStatus },
+    { status: "ready" },
     { where: { id: act.chapterId } },
   );
 
-  if (pass === 3) {
-    await aggregateChapterFinalText(act.chapterId);
-  }
+  await aggregateChapterFinalText(act.chapterId);
 
   return {
     status: 200,
@@ -347,9 +295,9 @@ router.get("/translate/:seriesId/chapter/:chapterId", async (req, res) => {
 
     const progress = {
       totalActs: acts.length,
-      pass1Done: acts.filter((act) => Boolean(act.anatomyProfile?.legacyAnalysis)).length,
-      pass2Done: acts.filter((act) => Boolean(act.anatomyProfile?.draftTranslation)).length,
-      pass3Done: acts.filter((act) => Boolean(act.translation)).length,
+      pass1Done: acts.length, // If acts exist, Architect is done
+      pass2Done: acts.filter((act) => Boolean(act.anatomyProfile?.linguistic)).length,
+      pass3Done: acts.filter((act) => Boolean(act.anatomyProfile?.finalTranslation)).length,
     };
 
     res.status(200).json({
@@ -468,7 +416,7 @@ router.post("/chapters/:chapterId/pass", async (req, res) => {
       ],
     });
 
-    if (pass === 3 && failures.length === 0) {
+    if (failures.length === 0) {
       await aggregateChapterFinalText(chapterId);
     }
 
@@ -516,13 +464,14 @@ router.patch("/acts/:actId", async (req, res) => {
       saveProfile = true;
       act.status = "processing";
     }
+    if (translation !== undefined) {
+      profile.finalTranslation = translation;
+      saveProfile = true;
+      act.status = "ready";
+    }
+
     if (saveProfile) {
       act.anatomyProfile = profile;
-    }
-    
-    if (translation !== undefined) {
-      act.translation = translation;
-      act.status = "ready";
     }
 
     act.lastRunAt = new Date();
@@ -539,6 +488,40 @@ router.patch("/acts/:actId", async (req, res) => {
     });
   } catch (error) {
     console.error("PATCH /api/translation/acts/:actId - Error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.delete("/chapters/:chapterId/acts", async (req, res) => {
+  try {
+    const chapterId = Number(req.params.chapterId);
+
+    if (!Number.isInteger(chapterId) || chapterId < 1) {
+      return res.status(400).json({ error: "Invalid chapterId" });
+    }
+
+    const chapter = await Chapter.findByPk(chapterId);
+    if (!chapter) {
+      return res.status(404).json({ error: `Chapter ${chapterId} not found` });
+    }
+
+    const deleted = await Act.destroy({ where: { chapterId } });
+
+    // Reset chapter status
+    chapter.status = "pending";
+    chapter.finalText = null;
+    await chapter.save();
+
+    res.status(200).json({
+      success: true,
+      message: `Deleted ${deleted} act(s) for chapter ${chapterId}`,
+      deletedCount: deleted,
+    });
+  } catch (error) {
+    console.error(
+      "DELETE /api/translation/chapters/:chapterId/acts - Error:",
+      error.message,
+    );
     res.status(500).json({ error: error.message });
   }
 });

@@ -1,148 +1,158 @@
-﻿import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useState, useEffect, useMemo } from "react";
+import { useSearchParams, useNavigate } from "react-router-dom";
 import { Button } from "../components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../components/ui/select";
+import { getSeriesGlossaryDetailed, updateGlossaryTerm, type DetailedGlossaryTerm } from "../lib/api";
+import { showError, showSuccess } from "../lib/notifications";
 
 export function ContextLibrary() {
-  const [scope, setScope] = useState<"series" | "chapter">("chapter");
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const [terms, setTerms] = useState<DetailedGlossaryTerm[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [editValues, setEditValues] = useState<Record<number, string>>({});
+  
+  // Use a fixed seriesId mapped from translation or 1 for demo purposes
+  const seriesId = Number(searchParams.get("seriesId") || "1");
 
-  const entries = [
-    { source: "专属客服", translation: "" },
-    { source: "刑渊", translation: "" },
-    { source: "白枫", translation: "" },
-    { source: "王菌群", translation: "" },
-    { source: "日本", translation: "" },
-    { source: "修罗班", translation: "" },
-    { source: "幽灵之血", translation: "" },
-    { source: "小姐", translation: "" },
-  ];
+  useEffect(() => {
+    loadTerms();
+  }, [seriesId]);
+
+  async function loadTerms() {
+    setIsLoading(true);
+    try {
+      const data = await getSeriesGlossaryDetailed(seriesId);
+      setTerms(data);
+      // Initialize edit values
+      const initialEdits: Record<number, string> = {};
+      data.forEach(t => { initialEdits[t.id] = t.termEn || ""; });
+      setEditValues(initialEdits);
+    } catch (err) {
+      console.error(err);
+      void showError("Failed to Load Glossary", "Could not load the terms for this series.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function handleApprove(termId: number) {
+    const value = editValues[termId]?.trim();
+    if (!value) {
+      void showError("Validation Error", "English translation is required before approving.");
+      return;
+    }
+
+    try {
+      await updateGlossaryTerm(termId, { termEn: value, status: "approved" });
+      void showSuccess("Term Approved", `The term translation has been saved.`);
+      setTerms(prev => prev.map(t => t.id === termId ? { ...t, status: "approved", termEn: value } : t));
+    } catch (err) {
+      console.error(err);
+      void showError("Update Failed", "Could not approve the term.");
+    }
+  }
+
+  const pendingTerms = useMemo(() => terms.filter(t => t.status === "pending" || !t.status), [terms]);
+  const approvedTerms = useMemo(() => terms.filter(t => t.status === "approved"), [terms]);
 
   return (
     <main className="flex-1 w-full max-w-5xl px-8 mt-32 mx-auto pb-24">
       <div className="mb-6">
-        <Link
-          to="/translation"
-          className="text-[#a0908b] hover:text-[#4A3D39] text-[10px] tracking-[0.2em] font-sans uppercase flex items-center gap-2 w-fit transition-colors"
+        <Button
+          variant="ghost"
+          onClick={() => navigate(-1)}
+          className="text-[#a0908b] hover:text-[#4A3D39] text-[10px] tracking-[0.2em] font-sans uppercase flex items-center gap-2 w-fit transition-colors p-0 h-auto"
         >
-          &larr; RENQUE
-        </Link>
+          &larr; BACK
+        </Button>
       </div>
 
       <h1 className="text-4xl font-serif text-[#4A3D39] tracking-wide mb-2">
         CONTEXT LIBRARY
       </h1>
-      <p className="text-[#807068] italic font-serif mb-8">Renque</p>
+      <p className="text-[#807068] italic font-serif mb-8">Series Workflow (Pending: {pendingTerms.length})</p>
 
       {/* Info Box */}
       <div className="bg-[#f2eadc]/60 border border-[#d8cdbd] rounded-sm p-6 mb-8 text-[13px] leading-relaxed font-serif text-[#5c504b]">
-        Context entries are injected into every{" "}
-        <strong>translation prompt</strong> for this series.{" "}
-        <strong>Series context</strong> applies to all chapters.{" "}
-        <strong>Chapter context</strong> is scoped to a specific chapter &mdash;
-        useful for temporary overrides and Pass 1 extractions. Entries added
-        here use{" "}
-        <strong>
-          source word &rarr; <span className="italic">English rendering</span>
-        </strong>{" "}
-        format.
+        Context entries are injected into every <strong>translation prompt</strong> for this series.
+        When you run Pass 1, AI extracts new terms and places them here for your review as <strong>Pending</strong>.
+        Provide an appropriate reading or English equivalent and approve them to integrate them globally.
       </div>
 
-      {/* Controls Row */}
-      <div className="flex flex-wrap items-center justify-between gap-4 mb-10 pb-4 border-b border-[#d8cdbd]">
-        <div className="flex items-center gap-6">
-          <div className="flex">
-            <Button
-              variant={scope === "series" ? "default" : "outline"}
-              className={`${scope === "series" ? "bg-[#1a1614] text-white hover:bg-[#2a2422]" : "border-[#d8cdbd] text-[#a0908b] hover:bg-[#f2eadc] bg-transparent"} 
-                font-sans text-[10px] tracking-[0.2em] uppercase rounded-r-none h-9 px-6 border-r-0`}
-              onClick={() => setScope("series")}
-            >
-              SERIES
-            </Button>
-            <Button
-              variant={scope === "chapter" ? "default" : "outline"}
-              className={`${scope === "chapter" ? "bg-[#1a1614] text-white hover:bg-[#2a2422]" : "border-[#d8cdbd] text-[#a0908b] hover:bg-[#f2eadc] bg-transparent"} 
-                font-sans text-[10px] tracking-[0.2em] uppercase rounded-l-none h-9 px-6`}
-              onClick={() => setScope("chapter")}
-            >
-              CHAPTER
-            </Button>
-          </div>
-
-          {scope === "chapter" && (
-            <div className="flex items-center gap-3">
-              <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase">
-                CHAPTER
-              </span>
-              <Select defaultValue="1">
-                <SelectTrigger className="w-16 h-9 border-[#d8cdbd] rounded-sm bg-transparent focus:ring-1 focus:ring-[#8b2626] font-sans text-[10px]">
-                  <SelectValue placeholder="1" />
-                </SelectTrigger>
-                <SelectContent className="bg-[#FBF9F6] border-[#d8cdbd]">
-                  <SelectItem value="1">1</SelectItem>
-                  <SelectItem value="2">2</SelectItem>
-                  <SelectItem value="3">3</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-
-          <div className="flex items-center gap-2">
-            <div className="w-1.5 h-1.5 rounded-full bg-[#c8a080]"></div>
-            <span className="text-[10px] tracking-[0.2em] font-sans text-[#c8a080] uppercase">
-              ANALYSED
-            </span>
-          </div>
-
-          <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase">
-            91 ENTRIES
-          </span>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <Button
-            variant="outline"
-            className="border-[#d8cdbd] text-[#a0908b] hover:bg-[#f2eadc] hover:text-[#4A3D39] rounded-sm px-4 h-9 text-[9px] tracking-[0.1em] uppercase transition-all bg-transparent font-sans"
-          >
-            PROMOTE ALL &rarr; SERIES
-          </Button>
-          <Button
-            variant="outline"
-            className="border-[#d8cdbd] text-[#a0908b] hover:bg-[#f2eadc] hover:text-[#4A3D39] rounded-sm px-4 h-9 text-[9px] tracking-[0.1em] uppercase transition-all bg-transparent font-sans"
-          >
-            OPEN IN EDITOR &nearr;
-          </Button>
-          <Button
-            variant="outline"
-            className="border-[#d8cdbd] text-[#c68080] hover:bg-[#ffeaea] hover:text-[#a04040] rounded-sm px-4 h-9 text-[9px] tracking-[0.1em] uppercase transition-all bg-transparent font-sans"
-          >
-            CLEAR ALL
-          </Button>
-        </div>
-      </div>
-
-      {/* Dictionary Section */}
-      <div className="w-full border border-[#d8cdbd] rounded-sm bg-[#FBF9F6] overflow-hidden">
-        {/* Section Header */}
-        <div className="bg-[#f2eadc]/40 px-6 py-4 flex justify-between items-center border-b border-[#d8cdbd] cursor-pointer hover:bg-[#f2eadc]/60 transition-colors">
+      {/* Pending Section */}
+      <div className="w-full border border-[#d8cdbd] rounded-sm bg-[#FBF9F6] overflow-hidden mb-8">
+        <div className="bg-[#f2eadc]/40 px-6 py-4 flex justify-between items-center border-b border-[#d8cdbd]">
           <div className="flex items-center gap-4">
-            <span className="text-[11px] tracking-[0.3em] font-sans text-[#c8a080] uppercase font-semibold">
-              CHARACTERS
+            <span className="text-[11px] tracking-[0.3em] font-sans text-[#a04040] uppercase font-semibold">
+              PENDING REVIEW
             </span>
             <span className="text-[9px] tracking-[0.1em] font-sans text-[#a0908b] uppercase">
-              13 ENTRIES
+              {pendingTerms.length} EXTRACTED TERMS
             </span>
           </div>
-          <span className="text-[8px] text-[#4A3D39]">&#9650;</span>
         </div>
 
-        {/* Table Structure */}
+        <div className="p-6 pt-4">
+          <div className="flex text-[9px] tracking-[0.2em] font-sans text-[#a0908b] uppercase mb-4 pb-2 border-b border-[#e8dfcf] px-2">
+            <div className="w-1/3">SOURCE / CONTEXT</div>
+            <div className="flex-1">TRANSLATION / RENDERING</div>
+            <div className="w-24 text-right">ACTION</div>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            {pendingTerms.map((entry) => (
+              <div
+                key={entry.id}
+                className="flex items-center text-sm font-serif px-2 py-3 hover:bg-[#ffeaea]/30 rounded-sm transition-colors group border-b border-[#f2eadc] last:border-0"
+              >
+                <div className="w-1/3 flex flex-col pr-4">
+                  <span className="text-[#4A3D39] font-bold text-base mb-1">{entry.canonicalForm}</span>
+                  <span className="text-[#a0908b] text-[10px] leading-snug italic line-clamp-2">
+                    {entry.TermAppearances?.[0]?.contextSentence || "No context found"}
+                  </span>
+                </div>
+                <div className="flex-1 flex flex-col justify-center text-[#a0908b]">
+                  <input
+                    type="text"
+                    placeholder="Enter final translation..."
+                    value={editValues[entry.id] || ""}
+                    onChange={(e) => setEditValues(prev => ({...prev, [entry.id]: e.target.value}))}
+                    className="bg-white border border-[#d8cdbd] rounded-sm px-3 py-1.5 outline-none focus:ring-1 focus:ring-[#c8a080] w-full max-w-sm text-[#4A3D39]"
+                  />
+                  <span className="text-[9px] font-sans uppercase mt-1">Suggested: {entry.termEn}</span>
+                </div>
+                <div className="w-24 text-right">
+                  <Button 
+                    onClick={() => void handleApprove(entry.id)}
+                    className="h-7 px-3 bg-[#4A3D39] hover:bg-[#2a2422] text-white text-[9px] tracking-widest font-sans uppercase rounded-sm"
+                  >
+                    Approve
+                  </Button>
+                </div>
+              </div>
+            ))}
+            {pendingTerms.length === 0 && (
+              <div className="py-8 text-center text-[#a0908b] italic text-sm">
+                {isLoading ? "Loading..." : "No pending terms. Run Pass 1 (Lexicographer) to extract new terms."}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Approved Section */}
+      <div className="w-full border border-[#d8cdbd] rounded-sm bg-[#FBF9F6] overflow-hidden opacity-90">
+        <div className="bg-[#f2eadc]/40 px-6 py-4 flex justify-between items-center border-b border-[#d8cdbd] cursor-pointer hover:bg-[#f2eadc]/60 transition-colors">
+          <div className="flex items-center gap-4">
+            <span className="text-[11px] tracking-[0.3em] font-sans text-[#2f7a46] uppercase font-semibold">
+              APPROVED DICTIONARY
+            </span>
+            <span className="text-[9px] tracking-[0.1em] font-sans text-[#a0908b] uppercase">
+              {approvedTerms.length} ACTIVE ENTRIES
+            </span>
+          </div>
+        </div>
+
         <div className="p-6 pt-4">
           <div className="flex text-[9px] tracking-[0.2em] font-sans text-[#a0908b] uppercase mb-4 pb-2 border-b border-[#e8dfcf] px-2">
             <div className="w-1/3">SOURCE</div>
@@ -150,25 +160,25 @@ export function ContextLibrary() {
           </div>
 
           <div className="flex flex-col gap-1">
-            {entries.map((entry, idx) => (
+            {approvedTerms.map((entry) => (
               <div
-                key={idx}
-                className="flex items-center text-sm font-serif px-2 py-3 hover:bg-[#f2eadc]/30 rounded-sm transition-colors group"
+                key={entry.id}
+                className="flex items-center text-sm font-serif px-2 py-2 hover:bg-[#f2eadc]/30 rounded-sm transition-colors group"
               >
-                <div className="w-1/3 text-[#4A3D39]">{entry.source}</div>
+                <div className="w-1/3 text-[#4A3D39] font-medium">{entry.canonicalForm}</div>
                 <div className="flex-1 flex items-center gap-6 text-[#a0908b]">
                   <span className="text-[#d8cdbd] text-xs font-sans">
                     &rarr;
                   </span>
-                  <input
-                    type="text"
-                    placeholder="translation / rendering"
-                    defaultValue={entry.translation}
-                    className="bg-transparent border-none outline-none focus:ring-0 w-full text-[#a0908b] placeholder:text-[#d0c0b8] placeholder:italic"
-                  />
+                  <span className="text-[#4A3D39]">{entry.termEn}</span>
                 </div>
               </div>
             ))}
+            {approvedTerms.length === 0 && (
+              <div className="py-4 text-[#a0908b] italic text-sm">
+                {isLoading ? "" : "No approved terms yet."}
+              </div>
+            )}
           </div>
         </div>
       </div>

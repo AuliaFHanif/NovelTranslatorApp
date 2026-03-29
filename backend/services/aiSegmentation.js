@@ -1,5 +1,6 @@
 const OpenAI = require("openai");
 const { estimateTokens } = require("./paragraphNormalizer");
+const { resolveModel } = require("./resolveModel");
 
 function normalizeBaseUrl(url) {
   const base = (url || "http://localhost:1234").replace(/\/+$/, "");
@@ -188,10 +189,12 @@ function smoothBoundaries(boundaries, paragraphs) {
   return finalBoundaries;
 }
 
-async function callSegmentationAI(paragraphs, retries = 3) {
+async function callSegmentationAI(paragraphs, retries = 3, options = {}) {
   if (!Array.isArray(paragraphs) || paragraphs.length === 0) {
     throw new Error("Cannot segment empty paragraph list");
   }
+
+  const modelId = await resolveModel(options.model);
 
   const messages = [
     {
@@ -205,7 +208,7 @@ async function callSegmentationAI(paragraphs, retries = 3) {
   for (let attempt = 0; attempt < retries; attempt += 1) {
     try {
       const response = await client.chat.completions.create({
-        model: process.env.LM_STUDIO_MODEL || "default",
+        model: modelId,
         messages,
         response_format: segmentationSchema,
         temperature: 0.2 + attempt * 0.15,

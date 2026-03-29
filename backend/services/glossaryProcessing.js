@@ -14,6 +14,7 @@ class GlossaryProcessingService {
     const language = act.Chapter?.Series?.language;
 
     const stats = { created: 0, merged: 0, appearances: 0 };
+    const processedTerms = [];
 
     for (const extracted of extractedTerms) {
       try {
@@ -33,13 +34,16 @@ class GlossaryProcessingService {
         // 3. Add variants if different form
         await this.handleVariants(term, extracted.term);
 
+        // Add to return list
+        processedTerms.push(term);
+
       } catch (err) {
         console.error(`Failed to process term "${extracted.term}":`, err.message);
         // Continue with other terms
       }
     }
 
-    return stats;
+    return { ...stats, terms: processedTerms };
   }
 
   async findOrCreateTerm(extracted, seriesId, language) {

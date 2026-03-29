@@ -15,14 +15,18 @@ import {
   listAIModels,
   LLM_PROXY_ENDPOINT,
   runArchitectPhase,
+  runChapterAnalysis,
   runActPass,
   runChapterPass,
   updateAct,
+  deleteAllActs,
   type Act,
   type AIModel,
   type TranslationChapter,
+  type DetailedGlossaryTerm,
 } from "../lib/api";
 import { showError, showInfo, showSuccess } from "../lib/notifications";
+import { GlossaryApprovalDialog } from "../components/GlossaryApprovalDialog";
 
 export function Translation() {
   const [searchParams] = useSearchParams();
@@ -39,6 +43,8 @@ export function Translation() {
   const [apiStatus, setApiStatus] = useState<
     "idle" | "testing" | "ok" | "error"
   >("idle");
+  const [extractedTerms, setExtractedTerms] = useState<DetailedGlossaryTerm[]>([]);
+  const [isGlossaryDialogOpen, setIsGlossaryDialogOpen] = useState(false);
 
   const seriesId = Number(searchParams.get("seriesId") || "0");
   const chapterId = Number(searchParams.get("chapterId") || "0");
@@ -51,9 +57,9 @@ export function Translation() {
   const progress = useMemo(
     () => ({
       total: acts.length,
-      pass1Done: acts.filter((act) => Boolean(act.anatomyProfile?.legacyAnalysis)).length,
-      pass2Done: acts.filter((act) => Boolean(act.anatomyProfile?.draftTranslation)).length,
-      pass3Done: acts.filter((act) => Boolean(act.translation)).length,
+      pass1Done: acts.length, // If acts exist, Architect is done
+      pass2Done: acts.filter((act) => Boolean(act.anatomyProfile?.linguistic)).length,
+      pass3Done: acts.filter((act) => Boolean(act.anatomyProfile?.finalTranslation)).length,
     }),
     [acts],
   );
@@ -90,7 +96,7 @@ export function Translation() {
 
   useEffect(() => {
     setEditableTranslation(
-      selectedAct?.translation || selectedAct?.anatomyProfile?.draftTranslation || "",
+      selectedAct?.anatomyProfile?.finalTranslation || selectedAct?.anatomyProfile?.draftTranslation || "",
     );
   }, [selectedAct]);
 
@@ -133,34 +139,34 @@ export function Translation() {
     }
   }
 
-  async function handleRunActPass(pass: 1 | 2 | 3) {
+  async function handleTranslateAct() {
     if (!selectedAct) {
-      await showInfo("No Act Selected", "Select an act before running a pass.");
+      await showInfo("No Act Selected", "Select an act before translating.");
       return;
     }
 
     if (!isLmStudioOnline) {
       await showError(
         "LM Studio Offline",
-        "Cannot run passes while LM Studio is offline.",
+        "Cannot translate while LM Studio is offline.",
       );
       return;
     }
 
     try {
       setIsRunningPass(true);
-      await runActPass(selectedAct.id, pass, {
+      await runActPass(selectedAct.id, 3, {
         model: modelName,
       });
       await loadTranslationChapter();
       await showSuccess(
-        "Pass Completed",
-        `Pass ${pass} finished for the selected act.`,
+        "Translation Completed",
+        `Act ${selectedAct.sequence} has been translated.`,
       );
     } catch (error) {
       await showError(
-        `Pass ${pass} Failed`,
-        error instanceof Error ? error.message : "Unable to run pass.",
+        "Translation Failed",
+        error instanceof Error ? error.message : "Unable to translate act.",
       );
     } finally {
       setIsRunningPass(false);
@@ -175,7 +181,7 @@ export function Translation() {
     if (!isLmStudioOnline) {
       await showError(
         "LM Studio Offline",
-        "Cannot run global passes while LM Studio is offline.",
+        "Cannot run passes while LM Studio is offline.",
       );
       return;
     }
@@ -183,37 +189,75 @@ export function Translation() {
     try {
       setIsRunningPass(true);
 
+      // Pass 1: Architect (segment chapter into acts)
       if (pass === 1) {
+        if (progress.total > 0) {
+          await showInfo(
+            "Already Segmented",
+            "Acts already exist. Delete all acts first to re-segment.",
+          );
+          return;
+        }
         const result = await runArchitectPhase(chapter.id);
         await loadTranslationChapter();
         await showSuccess(
-          "Pass 1 Completed",
-          `Architect segmented chapter into ${result.actsCreated} act(s) using ${result.segmentationSource}.`,
+          "Architect Completed",
+          `Chapter segmented into ${result.actsCreated} act(s) using ${result.segmentationSource}.`,
         );
         return;
       }
 
-      const result = await runChapterPass(chapter.id, pass, {
+      // Pass 2: Lexicographer (analysis + term extraction)
+      if (pass === 2) {
+        if (progress.total === 0) {
+          await showError("No Acts", "Run Pass 1 first to segment the chapter into acts.");
+          return;
+        }
+        const result = await runChapterAnalysis(chapter.id, {
+          model: modelName,
+        });
+        await loadTranslationChapter();
+        
+        if (result.terms && result.terms.length > 0) {
+            setExtractedTerms(result.terms);
+            setIsGlossaryDialogOpen(true);
+        } else {
+            await showSuccess(
+                "Lexicographer Completed",
+                `Analyzed ${result.processed || 0} act(s)${result.failed?.length > 0 ? `, ${result.failed.length} failed` : ""}. ${result.terms?.length ? `${result.terms.length} new terms extracted.` : "No new terms identified."}`,
+            );
+        }
+
+        return;
+      }
+
+      // Pass 3: Translation
+      if (progress.total === 0) {
+        await showError("No Acts", "Run Pass 1 first to segment the chapter into acts.");
+        return;
+      }
+
+      const result = await runChapterPass(chapter.id, 3, {
         model: modelName,
       });
       await loadTranslationChapter();
 
       if (result.failed > 0) {
         await showError(
-          `Pass ${pass} Completed With Errors`,
+          "Translation Completed With Errors",
           `${result.completed} acts succeeded, ${result.failed} failed.`,
         );
         return;
       }
 
       await showSuccess(
-        "Global Pass Completed",
-        `Pass ${pass} completed for ${result.completed} act(s).`,
+        "Translation Completed",
+        `All ${result.completed} act(s) translated.`,
       );
     } catch (error) {
       await showError(
         `Pass ${pass} Failed`,
-        error instanceof Error ? error.message : "Unable to run global pass.",
+        error instanceof Error ? error.message : "Unable to run pass.",
       );
     } finally {
       setIsRunningPass(false);
@@ -305,6 +349,31 @@ export function Translation() {
     await runConnectionTest(false);
   }
 
+  async function handleDeleteAllActs() {
+    if (!chapter) return;
+    if (acts.length === 0) {
+      await showInfo("No Acts", "There are no acts to delete.");
+      return;
+    }
+    const confirmed = window.confirm(
+      `Are you sure you want to delete all ${acts.length} act(s) for this chapter? This cannot be undone.`,
+    );
+    if (!confirmed) return;
+    try {
+      const result = await deleteAllActs(chapter.id);
+      await loadTranslationChapter();
+      await showSuccess(
+        "Acts Deleted",
+        `Deleted ${result.deletedCount} act(s). The chapter has been reset.`,
+      );
+    } catch (error) {
+      await showError(
+        "Delete Failed",
+        error instanceof Error ? error.message : "Unable to delete acts.",
+      );
+    }
+  }
+
   if (isLoadingChapter) {
     return (
       <div className="flex flex-col items-center justify-center w-full h-dvh text-[#807068] font-serif">
@@ -353,6 +422,13 @@ export function Translation() {
               className="border-[#d8cdbd] text-[#807068] h-8 text-[9px] tracking-widest rounded-sm px-4 hover:bg-[#f2eadc] bg-transparent font-sans uppercase"
             >
               REFRESH
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void handleDeleteAllActs()}
+              className="border-[#d8cdbd] text-[#c68080] h-8 text-[9px] tracking-widest rounded-sm px-4 hover:bg-[#ffeaea] hover:text-[#a04040] bg-transparent font-sans uppercase"
+            >
+              DELETE ALL ACTS
             </Button>
           </div>
         </div>
@@ -434,27 +510,11 @@ export function Translation() {
             <div className="flex justify-between p-2 pt-0 gap-2 shrink-0 bg-[#FBF9F6]">
               <Button
                 variant="outline"
-                onClick={() => void handleRunActPass(1)}
+                onClick={() => void handleTranslateAct()}
                 disabled={isRunningPass || !selectedAct || !isLmStudioOnline}
-                className="flex-1 h-8 text-[9px] tracking-[0.1em] bg-[#e8dfcf] hover:bg-[#d8cdbd] border-none text-[#a0908b] font-sans uppercase rounded-sm"
+                className="flex-1 h-8 text-[9px] tracking-[0.1em] bg-[#8b2626] hover:bg-[#701c1c] border-none text-white font-sans uppercase rounded-sm"
               >
-                Pass 1
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => void handleRunActPass(2)}
-                disabled={isRunningPass || !selectedAct || !isLmStudioOnline}
-                className="flex-1 h-8 text-[9px] tracking-[0.1em] bg-[#e8dfcf] hover:bg-[#d8cdbd] border-none text-[#a0908b] font-sans uppercase rounded-sm"
-              >
-                Pass 2
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => void handleRunActPass(3)}
-                disabled={isRunningPass || !selectedAct || !isLmStudioOnline}
-                className="flex-1 h-8 text-[9px] tracking-[0.1em] bg-[#e8dfcf] hover:bg-[#d8cdbd] border-none text-[#a0908b] font-sans uppercase rounded-sm"
-              >
-                Pass 3
+                Translate Act
               </Button>
             </div>
           </div>
@@ -472,7 +532,7 @@ export function Translation() {
             </div>
             <div className="flex-1 overflow-y-auto p-1 py-2">
               {acts.map((act) => {
-                const output = act.translation || act.anatomyProfile?.draftTranslation || "";
+                const output = act.anatomyProfile?.finalTranslation || act.anatomyProfile?.draftTranslation || "";
                 return (
                   <div
                     key={act.id}
@@ -608,11 +668,11 @@ export function Translation() {
               className="h-8 text-[9px] tracking-[0.1em] bg-[#d0a080] hover:bg-[#bd8c6c] text-white font-sans uppercase rounded-sm px-5 flex items-center gap-2"
             >
               <span className="text-[10px]">
-                {progress.total > 0 && progress.pass1Done === progress.total
+                {progress.total > 0
                   ? "✔"
                   : "〇"}
               </span>{" "}
-              PASS 1
+              SEGMENT
             </Button>
             <Button
               onClick={() => void handleRunChapterPass(2)}
@@ -626,7 +686,7 @@ export function Translation() {
                   ? "✔"
                   : "〇"}
               </span>{" "}
-              PASS 2
+              ANALYZE
             </Button>
             <Button
               onClick={() => void handleRunChapterPass(3)}
@@ -640,11 +700,18 @@ export function Translation() {
                   ? "✔"
                   : "〇"}
               </span>{" "}
-              PASS 3
+              TRANSLATE
             </Button>
           </div>
         </div>
       </div>
+
+      <GlossaryApprovalDialog
+        isOpen={isGlossaryDialogOpen}
+        onOpenChange={setIsGlossaryDialogOpen}
+        terms={extractedTerms}
+        onApproved={() => void loadTranslationChapter()}
+      />
     </div>
   );
 }

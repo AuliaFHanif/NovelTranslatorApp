@@ -1,5 +1,6 @@
 const OpenAI = require('openai');
 const schemas = require('./analysisSchemas');
+const { resolveModel } = require('./resolveModel');
 
 class CombinedAnalysisService {
   constructor() {
@@ -7,19 +8,22 @@ class CombinedAnalysisService {
       baseURL: process.env.LM_STUDIO_URL || 'http://localhost:1234/v1',
       apiKey: 'lm-studio'
     });
-    this.model = process.env.LM_STUDIO_MODEL || 'default';
   }
 
   /**
    * Analyze a single act
    * @param {Object} act - Act instance (with Chapter and Series loaded)
+   * @param {Object} [options] - Optional settings
+   * @param {string} [options.model] - Explicit model ID to use
    * @returns {Object} Analysis result with glossary terms and profiles
    */
-  async analyzeAct(act) {
+  async analyzeAct(act, options = {}) {
     const language = act.Chapter?.Series?.language;
     if (!language || !['ja', 'zh'].includes(language)) {
       throw new Error(`Unsupported language: ${language}`);
     }
+
+    const modelId = await resolveModel(options.model);
 
     const schema = schemas[language];
     const messages = [
@@ -35,7 +39,7 @@ class CombinedAnalysisService {
 
     try {
       const response = await this.client.chat.completions.create({
-        model: this.model,
+        model: modelId,
         messages,
         response_format: schema,
         temperature: 0.3,

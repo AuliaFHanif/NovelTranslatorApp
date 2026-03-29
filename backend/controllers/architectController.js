@@ -78,16 +78,18 @@ async function runArchitectPhase(req, res) {
 
     return res.status(200).json({
       success: true,
-      chapterId,
-      actsCreated: acts.length,
-      segmentationSource: segmentation.source,
-      pass1Diagnostics: coverageDiagnostics,
-      acts: acts.map((act) => ({
-        id: act.id,
-        label: act.label,
-        sequence: act.sequence,
-        status: act.status
-      })),
+      data: {
+        chapterId,
+        actsCreated: acts.length,
+        segmentationSource: segmentation.source,
+        pass1Diagnostics: coverageDiagnostics,
+        acts: acts.map((act) => ({
+          id: act.id,
+          label: act.label,
+          sequence: act.sequence,
+          status: act.status
+        }))
+      }
     });
   } catch (error) {
     console.error(

@@ -109,7 +109,6 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.TEXT,
       allowNull: false
     },
-    translation: DataTypes.TEXT,
     tokenCount: {
       type: DataTypes.INTEGER,
       defaultValue: 0

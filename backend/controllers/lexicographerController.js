@@ -8,6 +8,7 @@ class LexicographerController {
    */
   async analyzeChapter(req, res) {
     const { chapterId } = req.params;
+    const { model } = req.body || {};
 
     try {
       // 1. Load chapter with acts and series
@@ -44,8 +45,12 @@ class LexicographerController {
           created: 0,
           merged: 0,
           appearances: 0
-        }
+        },
+        terms: [] // Track unique terms for the frontend to approve
       };
+
+      const termMap = new Map(); // Use ID to deduplicate
+
 
       // Sort by sequence to ensure order
       const sortedActs = chapter.Acts.sort((a, b) => a.sequence - b.sequence);
@@ -54,8 +59,11 @@ class LexicographerController {
         try {
           console.log(`[Phase 3] Analyzing act ${act.label} (${act.id})`);
 
-          // Run AI analysis
-          const analysis = await combinedAnalysis.analyzeAct(act);
+          // Ensure act has access to parent Chapter/Series for analysis context
+          act.Chapter = chapter;
+
+          // Run AI analysis with explicit model
+          const analysis = await combinedAnalysis.analyzeAct(act, { model });
 
           // Process glossary terms (uses TermAppearances table)
           const glossaryStats = await glossaryProcessing.processTerms(
@@ -66,6 +74,13 @@ class LexicographerController {
           results.glossary.created += glossaryStats.created;
           results.glossary.merged += glossaryStats.merged;
           results.glossary.appearances += glossaryStats.appearances;
+
+          // Track newly processed terms for final response
+          if (glossaryStats.terms) {
+            glossaryStats.terms.forEach(t => {
+              termMap.set(t.id, t);
+            });
+          }
 
           // Update act with analysis and strategy
           await act.update({
@@ -107,6 +122,10 @@ class LexicographerController {
         results.chapterStrategy = chapterStrategy;
       }
 
+      // Convert term map back to list for response
+      results.terms = Array.from(termMap.values());
+
+
       // 4. Count pending glossary for response
       const pendingGlossary = await GlossaryTerm.count({
         where: {
@@ -117,9 +136,11 @@ class LexicographerController {
 
       res.json({
         success: true,
-        chapterId: parseInt(chapterId),
-        ...results,
-        pendingGlossary
+        data: {
+          chapterId: parseInt(chapterId),
+          ...results,
+          pendingGlossary
+        }
       });
 
     } catch (err) {
@@ -157,9 +178,12 @@ class LexicographerController {
       });
 
       res.json({
-        seriesId: parseInt(seriesId),
-        count: entries.length,
-        entries
+        success: true,
+        data: {
+          seriesId: parseInt(seriesId),
+          count: entries.length,
+          entries
+        }
       });
 
     } catch (err) {
@@ -199,9 +223,12 @@ class LexicographerController {
       });
 
       res.json({
-        seriesId: parseInt(seriesId),
-        count: entries.length,
-        entries
+        success: true,
+        data: {
+          seriesId: parseInt(seriesId),
+          count: entries.length,
+          entries
+        }
       });
 
     } catch (err) {
@@ -241,7 +268,7 @@ class LexicographerController {
 
       res.json({
         success: true,
-        term
+        data: term
       });
 
     } catch (err) {
@@ -280,13 +307,16 @@ class LexicographerController {
       }
 
       res.json({
-        actId: parseInt(actId),
-        label: act.label,
-        sequence: act.sequence,
-        status: act.status,
-        anatomyProfile: act.anatomyProfile,
-        strategy,
-        terms: act.Terms
+        success: true,
+        data: {
+          actId: parseInt(actId),
+          label: act.label,
+          sequence: act.sequence,
+          status: act.status,
+          anatomyProfile: act.anatomyProfile,
+          strategy,
+          terms: act.Terms
+        }
       });
 
     } catch (err) {
@@ -309,7 +339,13 @@ class LexicographerController {
         }
       });
 
-      res.json({ seriesId: parseInt(seriesId), pendingCount: count });
+      res.json({
+        success: true,
+        data: {
+          seriesId: parseInt(seriesId),
+          pendingCount: count
+        }
+      });
 
     } catch (err) {
       res.status(500).json({ error: err.message });

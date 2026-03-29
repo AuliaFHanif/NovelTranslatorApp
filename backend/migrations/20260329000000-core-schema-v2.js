@@ -147,11 +147,6 @@ module.exports = {
         allowNull: false,
         comment: 'Segmented text content from Phase 2'
       },
-      translation: {
-        type: Sequelize.TEXT,
-        allowNull: true,
-        comment: 'Phase 5: Final translation output'
-      },
       tokenCount: {
         type: Sequelize.INTEGER,
         allowNull: false,

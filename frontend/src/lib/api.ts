@@ -33,10 +33,12 @@ export interface Act {
   sequence: number;
   label: string;
   rawText: string;
-  translation: string | null;
   anatomyProfile?: {
     legacyAnalysis?: string;
     draftTranslation?: string;
+    finalTranslation?: string;
+    linguistic?: any;
+    narrative?: any;
   };
   status: string;
   lastRunAt: string | null;
@@ -56,6 +58,66 @@ export interface TranslationProgress {
   pass2Done: number;
   pass3Done: number;
 }
+
+export interface GlossaryTerm {
+  id: number;
+  seriesId: number;
+  canonicalForm: string;
+  termJa?: string;
+  termZh?: string;
+  termEn: string;
+  type: string;
+  definition?: string;
+  metadata: Record<string, any>;
+  status: 'pending' | 'approved' | 'rejected';
+  confidence?: number;
+  createdAt: string;
+  updatedAt: string;
+  TermAppearances?: Array<{
+    contextSentence: string;
+    confidence: number;
+  }>;
+}
+
+export interface TermAppearance {
+  id: number;
+  termId: number;
+  actId: number;
+  contextSentence: string;
+  confidence: number;
+  extractedAt: string;
+}
+
+export interface DetailedGlossaryTerm extends GlossaryTerm {
+  appearancesCount?: number;
+  TermAppearances?: Array<TermAppearance & {
+    Act?: {
+      id: number;
+      label: string;
+      sequence: number;
+      Chapter?: {
+        number: number;
+        title: string;
+      }
+    }
+  }>;
+}
+
+
+export interface AnalysisResult {
+  success: boolean;
+  chapterId: number;
+  processed: number;
+  failed: any[];
+  glossary: {
+    created: number;
+    merged: number;
+    appearances: number;
+  };
+  pendingGlossary: number;
+  terms?: DetailedGlossaryTerm[];
+}
+
 
 export interface TranslationBootstrapResponse {
   chapter: TranslationChapter;
@@ -316,18 +378,14 @@ export async function runChapterPass(
 export async function runArchitectPhase(
   chapterId: number,
 ): Promise<ArchitectResult> {
-  const result = await requestJson<
-    ArchitectResult | ApiItemResponse<ArchitectResult>
-  >(`/chapters/${chapterId}/architect`, {
-    method: "POST",
-  });
+  const result = await requestJson<ApiItemResponse<ArchitectResult>>(
+    `/chapters/${chapterId}/architect`,
+    {
+      method: "POST",
+    },
+  );
 
-  // Architect endpoint can return either a flat payload or { data } wrapper.
-  if (result && typeof result === "object" && "data" in result) {
-    return result.data;
-  }
-
-  return result as ArchitectResult;
+  return result.data;
 }
 
 export async function updateAct(
@@ -347,6 +405,60 @@ export async function updateAct(
   );
 
   return result.data;
+}
+
+/**
+ * LEXICOGRAPHER & GLOSSARY API FUNCTIONS
+ */
+
+export async function runChapterAnalysis(
+  chapterId: number,
+  options?: { model?: string; temperature?: number }
+): Promise<AnalysisResult> {
+  const result = await requestJson<ApiItemResponse<AnalysisResult>>(
+    `/chapters/${chapterId}/analyze`,
+    {
+      method: "POST",
+      body: JSON.stringify(options || {}),
+    }
+  );
+  return result.data;
+}
+
+export async function getSeriesGlossaryDetailed(seriesId: number): Promise<GlossaryTerm[]> {
+  const result = await requestJson<ApiListResponse<GlossaryTerm>>(`/series/${seriesId}/glossary/detailed`);
+  // Handle variations in backend response format (sometimes wrapped in data, sometimes just array)
+  if (Array.isArray(result)) return result;
+  return result.data || [];
+}
+
+export async function updateGlossaryTerm(
+  termId: number,
+  payload: {
+    termEn?: string;
+    status?: 'pending' | 'approved' | 'rejected';
+    definition?: string;
+  }
+): Promise<GlossaryTerm> {
+  const result = await requestJson<ApiItemResponse<GlossaryTerm>>(
+    `/glossary-terms/${termId}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }
+  );
+  return result.data;
+}
+
+export async function deleteAllActs(
+  chapterId: number,
+): Promise<{ deletedCount: number }> {
+  const result = await requestJson<
+    ApiItemResponse<{ deletedCount: number }>
+  >(`/translation/chapters/${chapterId}/acts`, {
+    method: "DELETE",
+  });
+  return result.data ?? result;
 }
 
 /**

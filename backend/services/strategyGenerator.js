@@ -75,7 +75,7 @@ class StrategyGenerator {
 
       statusLanguageStrategy: this.determineStatusStrategy(linguistic?.statusLanguage),
 
-       నాలుగుCharacterIdioms: linguistic?.fourCharacterIdioms?.length > 0
+      fourCharacterIdioms: linguistic?.fourCharacterIdioms?.length > 0
         ? 'preserve_pinyin'
         : 'standard',
 
