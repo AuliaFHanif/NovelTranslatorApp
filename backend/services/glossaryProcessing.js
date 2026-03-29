@@ -43,6 +43,7 @@ class GlossaryProcessingService {
 
         if (existingTerm && existingTerm.status === 'approved') {
           // Record appearance immediately for approved terms
+          console.log(`[Phase 3] Logging appearance for EXISTING APPROVED term: ${normalized.term}`);
           await this.recordAppearance(existingTerm.id, act.id, normalized);
           approvedCount++;
           
@@ -50,6 +51,7 @@ class GlossaryProcessingService {
           await this.handleVariants(existingTerm, normalized.term);
         } else {
           // If not approved (unseen or pending), treat as candidate
+          console.log(`[Phase 3] Identified NEW CANDIDATE: ${normalized.term} (Existing: ${!!existingTerm})`);
           candidates.push({
             ...normalized,
             existingId: existingTerm?.id || null,
@@ -112,6 +114,7 @@ class GlossaryProcessingService {
         if (item.existingId) {
           term = await GlossaryTerm.findByPk(item.existingId);
           if (term) {
+            console.log(`[Phase 3] UPDATING existing term via bulk-approve: ${item.term}`);
             await term.update({
               termEn: item.termEn || item.proposedTranslation, // User edited or AI proposed
               status: 'approved',
@@ -124,6 +127,7 @@ class GlossaryProcessingService {
 
         if (!term) {
           // Create new approved term
+          console.log(`[Phase 3] CREATING new approved term via bulk-approve: ${item.term}`);
           term = await GlossaryTerm.create({
             seriesId,
             canonicalForm: item.term,
@@ -239,6 +243,7 @@ class GlossaryProcessingService {
 
   async recordAppearance(termId, actId, extracted) {
     // Use linking table - NEW SCHEMA PATTERN
+    console.log(`[Phase 3] Recording appearance for termId: ${termId} in actId: ${actId}`);
     const [appearance, created] = await TermAppearance.findOrCreate({
       where: {
         termId,

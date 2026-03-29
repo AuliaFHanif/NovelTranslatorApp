@@ -73,11 +73,13 @@ export interface GlossaryTerm {
   confidence?: number;
   createdAt: string;
   updatedAt: string;
-  TermAppearances?: Array<{
+  Appearances?: Array<{
     contextSentence: string;
     confidence: number;
   }>;
 }
+
+export type DetailedGlossaryTerm = GlossaryTerm;
 
 export interface TermAppearance {
   id: number;
@@ -375,6 +377,16 @@ export async function streamActTranslation(
   }
 }
 
+export async function getActTranslationPrompt(
+  actId: number,
+  model: string,
+): Promise<{ messages: Array<{ role: string; content: string }> }> {
+  const result = await requestJson<
+    ApiItemResponse<{ messages: Array<{ role: string; content: string }> }>
+  >(`/translation/acts/${actId}/prompt?model=${encodeURIComponent(model)}`);
+  return result.data;
+}
+
 export async function runActPass(
   actId: number,
   pass: 1 | 2 | 3,
@@ -484,6 +496,7 @@ export async function updateGlossaryTerm(
   termId: number,
   payload: {
     termEn?: string;
+    type?: string;
     status?: 'pending' | 'approved' | 'rejected';
     definition?: string;
   }

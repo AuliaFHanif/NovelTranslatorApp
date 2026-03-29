@@ -1,5 +1,5 @@
 const { combinedAnalysis, glossaryProcessing, strategyGenerator } = require('../services');
-const { Chapter, Act, GlossaryTerm, TermAppearance } = require('../models');
+const { Chapter, Act, GlossaryTerm, TermAppearance, Series } = require('../models');
 
 class LexicographerController {
   /**
@@ -17,7 +17,6 @@ class LexicographerController {
           {
             model: Act,
             as: 'Acts',
-            where: { status: 'pending' },
             required: false
           },
           'Series'
@@ -30,7 +29,7 @@ class LexicographerController {
 
       if (!chapter.Acts || chapter.Acts.length === 0) {
         return res.status(400).json({
-          error: 'No pending acts to analyze. Run Phase 2 first.'
+          error: 'No acts found to analyze. Run Phase 1 (Segmentation) first.'
         });
       }
 
@@ -265,43 +264,32 @@ class LexicographerController {
     }
   }
 
-  /**
-   * Update glossary entry (approve/reject/edit)
-   * PUT /api/glossary-terms/:termId
-   */
   async updateGlossaryTerm(req, res) {
     const { termId } = req.params;
-    const { termEn, definition, status, metadata } = req.body;
+    const { termEn, definition, status, type } = req.body;
 
     try {
       const term = await GlossaryTerm.findByPk(termId);
+      if (!term) return res.status(404).json({ success: false, error: 'Term not found' });
 
-      if (!term) {
-        return res.status(404).json({ error: 'Term not found' });
+      // If status is rejected, DELETE the term (don't just flag it)
+      if (status === 'rejected') {
+        await term.destroy();
+        return res.json({ success: true, message: 'Term deleted successfully' });
       }
 
-      const updates = {};
-      if (termEn !== undefined) updates.termEn = termEn;
-      if (definition !== undefined) updates.definition = definition;
-      if (metadata !== undefined) updates.metadata = { ...term.metadata, ...metadata };
-
-      if (status) {
-        updates.status = status;
-        if (status === 'approved') {
-          updates.approvedAt = new Date();
-          updates.approvedBy = req.user?.id || null;
-        }
-      }
-
-      await term.update(updates);
-
-      res.json({
-        success: true,
-        data: term
+      const updated = await term.update({ 
+        termEn, 
+        definition, 
+        status, 
+        type, 
+        approvedAt: status === 'approved' ? new Date() : term.approvedAt 
       });
 
+      res.json({ success: true, data: updated });
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      console.error(err);
+      res.status(500).json({ success: false, error: err.message });
     }
   }
 

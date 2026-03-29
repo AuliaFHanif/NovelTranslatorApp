@@ -68,10 +68,10 @@ class CombinedAnalysisService {
 
     const common = `
 NAMING CONVENTION (CRITICAL):
-- For all "character" and "location" types, the "proposedTranslation" MUST be phonetic transliteration.
-- For Chinese: Use Pinyin without tone marks (e.g., "白枫" -> "Bai Feng").
-- For Japanese: Use Romaji (e.g., "田中" -> "Tanaka").
-- Do NOT translate names literally (e.g., "白枫" is NOT "White Maple").
+- Phonetic Transliteration (Pinyin/Romaji) is for PROPER NAMES ONLY (e.g., Characters, Sect names, or specifically NAMED locations like "Great Wall").
+- For PROPER NAMES in Chinese: Use Pinyin without tone marks (e.g., "白枫" -> "Bai Feng").
+- For PROPER NAMES in Japanese: Use Romaji (e.g., "田中" -> "Tanaka").
+- Do NOT transliterate generic terms. If a concept or common noun like "forest" (山林) or "clear sky" (晴空万里) is extracted, provide a LITERARY ENGLISH TRANSLATION (e.g., "mountain forest" or "clear sky") instead of phonetic transliteration.
 `;
 
     if (language === 'ja') {
@@ -125,15 +125,14 @@ ${truncated}
 
 ### TERM EXTRACTION POLICY (STRICT!)
 1. PRIORITIZE:
-   - Character Names (Use phonetic names only - "Bai Feng" not "White Maple")
-   - Organization Names (Sects, guilds, clans)
-   - Unique Location Names (Distinct nouns)
-   - Unique World Terms (Magic items, techniques)
-2. EXCLUDE:
+   - Proper Names (Characters, Sects, named unique locations - use phonetic transliteration like "Bai Feng").
+   - Unique World Terms (Named magic items, specific techniques - translate with weight).
+2. EXCLUDE (Very Important):
    - General dictionary terms (e.g., "running", "house", "angry", "sword").
+   - Generic environment descriptions (e.g., "forest", "sky", "village") UNLESS they are unique proper nouns.
 3. FORMATTING:
    - The "term" field must be the EXACT source text from the novel.
-   - Do NOT add explanations or phonetic romaji inside the "term" field.`;
+   - For proper name translations, use capitalization (e.g., "Bai Feng" instead of "bai feng").`;
   }
 }
 

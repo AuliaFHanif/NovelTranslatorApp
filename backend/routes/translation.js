@@ -70,36 +70,48 @@ function formatGlossary(entries, language) {
         entry.canonicalForm ||
         "(no source term)";
       const englishTerm = entry.termEn || "(no English term)";
+      const typePrefix = entry.type ? `[${entry.type.toUpperCase()}] ` : "";
       const definition = entry.definition ? ` - ${entry.definition}` : "";
-      return `- ${sourceTerm} => ${englishTerm}${definition}`;
+      return `- ${typePrefix}${sourceTerm} => ${englishTerm}${definition}`;
     })
     .join("\n");
 }
 
 async function collectGlossaryForAct(chapter, act) {
-  const allApproved = await GlossaryTerm.findAll({
-    where: {
-      seriesId: chapter.seriesId,
-      status: "approved"
-    },
+  // 1. Get terms specifically linked to this act via Phase 3 analysis (TermAppearances)
+  const linkedApproved = await act.getGlossaryTerms({
+    where: { status: "approved" },
     order: [["updatedAt", "DESC"]],
   });
 
-  if (!act.rawText || !allApproved.length) {
-    return [];
-  }
-
-  // Filter ONLY terms that actually appear in the act's source text
-  const termField = chapter.Series?.language === "ja" ? "termJa" : "termZh";
-  const relevanceFilter = allApproved.filter(term => {
-    const sourceString = term[termField] || term.canonicalForm;
-    if (!sourceString) return false;
-    
-    // Exact match case-sensitive for source languages is best
-    return act.rawText.includes(sourceString);
+  // 2. Fallback/Supplemental: Get all other approved terms for the series and scan for them
+  // This catches terms added to glossary AFTER the analysis pass
+  const allApproved = await GlossaryTerm.findAll({
+    where: {
+      seriesId: chapter.seriesId,
+      status: "approved",
+      id: { [Op.notIn]: linkedApproved.map(t => t.id) }
+    },
   });
 
-  return relevanceFilter;
+  if (!act.rawText) {
+    return linkedApproved;
+  }
+
+  const termField = chapter.Series?.language === "ja" ? "termJa" : "termZh";
+  const manualScanMatches = allApproved.filter(term => {
+    // Check all possible forms: field specific, canonical, and variants
+    const forms = [
+      term[termField],
+      term.canonicalForm,
+      ...(term.metadata?.variants || [])
+    ].filter(Boolean);
+    
+    return forms.some(form => act.rawText.includes(form));
+  });
+
+  // Combine both sets
+  return [...linkedApproved, ...manualScanMatches];
 }
 
 async function aggregateChapterFinalText(chapterId) {
@@ -141,7 +153,7 @@ async function prepareActTranslationContext(act, model) {
   const glossaryText = formatGlossary(glossaryEntries, chapter.Series.language);
 
   // EXPLICIT ACT CONTEXT
-  let analysisContext = `Current Position: Chapter ${chapter.number} | Act ${act.sequence} - ${act.label}\n\n`;
+  let analysisContext = `Current Position: Chapter ${chapter.number} | Act ${act.sequence} - ${act.label}`;
   
   const linguistic = act.anatomyProfile?.linguistic;
   const narrative = act.anatomyProfile?.narrative;
@@ -155,7 +167,7 @@ async function prepareActTranslationContext(act, model) {
     if (linguistic?.onomatopoeia?.density) parts.push(`Onomatopoeia density: ${linguistic.onomatopoeia.density}`);
     if (narrative?.emotionalTone?.enryo) parts.push("Enryo (restraint/reserve) present");
     if (narrative?.emotionalTone?.amae) parts.push("Amae (dependence/indulgence) present");
-    if (parts.length > 0) analysisContext = parts.join("\n");
+    if (parts.length > 0) analysisContext += "\n\n" + parts.join("\n");
   }
 
   const messages = buildTranslationPrompt({
@@ -198,7 +210,7 @@ async function runPassOnAct({
     messages,
     temperature: temperature ?? 0.4,
     top_p: top_p ?? 0.9,
-    max_tokens: max_tokens ?? 8192,
+    max_tokens: max_tokens ?? 16384,
   };
 
   let llmResponse;
@@ -465,6 +477,28 @@ router.post("/chapters/:chapterId/pass", async (req, res) => {
   }
 });
 
+router.get("/acts/:actId/prompt", async (req, res) => {
+  try {
+    const actId = Number(req.params.actId);
+    const model = req.query.model;
+    const act = await Act.findByPk(actId);
+    
+    if (!act) return res.status(404).json({ error: "Act not found" });
+
+    const { messages } = await prepareActTranslationContext(act, model);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        messages,
+      },
+    });
+  } catch (error) {
+    console.error("GET /api/translation/acts/:actId/prompt - Error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.get("/acts/:actId/stream", async (req, res) => {
   try {
     const actId = Number(req.params.actId);
@@ -483,7 +517,7 @@ router.get("/acts/:actId/stream", async (req, res) => {
       model: resolvedModel,
       messages,
       temperature: 0.4,
-      max_tokens: 8192,
+      max_tokens: 16384,
       stream: true
     };
 
@@ -618,6 +652,7 @@ router.delete("/chapters/:chapterId/acts", async (req, res) => {
     // Reset chapter status
     chapter.status = "pending";
     chapter.finalText = null;
+    chapter.strategyProfile = null;
     await chapter.save();
 
     res.status(200).json({

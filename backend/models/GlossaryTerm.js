@@ -17,6 +17,11 @@ module.exports = (sequelize, DataTypes) => {
           through: models.TermAppearance,
           foreignKey: 'termId',
           otherKey: 'actId',
+          as: 'AssociatedActs'
+        });
+
+        GlossaryTerm.hasMany(models.TermAppearance, {
+          foreignKey: 'termId',
           as: 'Appearances'
         });
       }
