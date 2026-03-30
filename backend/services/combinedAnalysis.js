@@ -119,9 +119,13 @@ Genre: ${series.genre || 'Unknown'}`;
       ? text.substring(0, 3000) + '... [truncated]'
       : text;
 
-    return `${context.join('\n')}
+    return `### CONTEXT
+${context.join('\n')}
 
+### SOURCE TEXT (STRICT: ONLY EXTRACT FROM HERE)
+[START]
 ${truncated}
+[END]
 
 ### TERM EXTRACTION POLICY (STRICT!)
 1. PRIORITIZE:
@@ -130,6 +134,7 @@ ${truncated}
 2. EXCLUDE (Very Important):
    - General dictionary terms (e.g., "running", "house", "angry", "sword").
    - Generic environment descriptions (e.g., "forest", "sky", "village") UNLESS they are unique proper nouns.
+   - **Do NOT extract terms from the CONTEXT section above (Series title, Chapter title). Only extract from the [START]...[END] block.**
 3. FORMATTING:
    - The "term" field must be the EXACT source text from the novel.
    - For proper name translations, use capitalization (e.g., "Bai Feng" instead of "bai feng").`;

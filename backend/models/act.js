@@ -123,7 +123,8 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.ENUM('pending', 'processing', 'ready', 'complete'),
       defaultValue: 'pending'
     },
-    anatomyProfile: DataTypes.JSONB
+    anatomyProfile: DataTypes.JSONB,
+    translatedText: DataTypes.TEXT
   }, {
     sequelize,
     modelName: 'Act',

@@ -60,6 +60,11 @@ class LexicographerController {
             // Ensure act has access to parent Chapter/Series for analysis context
             act.Chapter = chapter;
 
+            // CLEAR STALE LINKS: Remove existing appearances for this act before fresh analysis
+            await TermAppearance.destroy({
+              where: { actId: act.id }
+            });
+
             // Run AI analysis with explicit model
             const analysis = await combinedAnalysis.analyzeAct(act, { model });
 

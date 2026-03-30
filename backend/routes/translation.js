@@ -117,27 +117,43 @@ async function collectGlossaryForAct(chapter, act) {
 async function aggregateChapterFinalText(chapterId) {
   const acts = await Act.findAll({
     where: { chapterId },
-    order: [
-      ["sequence", "ASC"]
-    ],
+    order: [["sequence", "ASC"]],
   });
 
-  const finalText = acts
-    .map((act) => (act.anatomyProfile?.finalTranslation || "").trim())
-    .filter(Boolean)
-    .join("\n\n");
+  const cleanedTexts = acts.map((act) => {
+    // Priority: 1. translatedText (user manual save or P3 output)
+    //           2. anatomyProfile.finalTranslation (legacy/internal)
+    let text = act.translatedText || act.anatomyProfile?.finalTranslation || "";
+    
+    // Strip <think>...</think> or Thinking Process: ... </think> blocks
+    let cleaned = text.replace(/(?:<think>|Thinking Process:)[\s\S]*?<\/think>/g, "").trim();
+    
+    // Handle orphaned </think> (where the AI starts thinking without an opening tag/phrase)
+    if (cleaned.includes("</think>")) {
+      cleaned = cleaned.split("</think>").pop().trim();
+    }
+    
+    return cleaned;
+  }).filter(Boolean);
+
+  const finalText = cleanedTexts.join("\n\n");
 
   const chapter = await Chapter.findByPk(chapterId);
   if (!chapter) {
-    return;
+    return null;
   }
 
   chapter.finalText = finalText || null;
-  chapter.status =
-    acts.length > 0 && acts.every((act) => act.anatomyProfile?.finalTranslation)
-      ? "ready"
-      : chapter.status;
+  
+  // If we have text for all acts, set status to complete
+  if (acts.length > 0 && cleanedTexts.length === acts.length) {
+    chapter.status = "complete";
+  } else if (cleanedTexts.length > 0) {
+    chapter.status = "ready";
+  }
+
   await chapter.save();
+  return chapter;
 }
 
 async function prepareActTranslationContext(act, model) {
@@ -282,7 +298,7 @@ async function runPassOnAct({
     { where: { id: act.chapterId } },
   );
 
-  await aggregateChapterFinalText(act.chapterId);
+  // await aggregateChapterFinalText(act.chapterId);
 
   return {
     status: 200,
@@ -454,9 +470,9 @@ router.post("/chapters/:chapterId/pass", async (req, res) => {
       ],
     });
 
-    if (failures.length === 0) {
-      await aggregateChapterFinalText(chapterId);
-    }
+    // if (failures.length === 0) {
+    //   await aggregateChapterFinalText(chapterId);
+    // }
 
     res.status(failures.length > 0 ? 207 : 200).json({
       success: failures.length === 0,
@@ -557,7 +573,7 @@ router.get("/acts/:actId/stream", async (req, res) => {
         act.anatomyProfile = { ...profile, finalTranslation: fullText };
         act.status = "ready";
         await act.save();
-        await aggregateChapterFinalText(act.chapterId);
+        // await aggregateChapterFinalText(act.chapterId);
       } catch (err) {
         console.error("Failed to save streamed translation:", err);
       }
@@ -612,6 +628,10 @@ router.patch("/acts/:actId", async (req, res) => {
       act.status = "ready";
     }
 
+    if (translation !== undefined) {
+      act.translatedText = translation;
+    }
+
     if (saveProfile) {
       act.anatomyProfile = profile;
     }
@@ -619,9 +639,9 @@ router.patch("/acts/:actId", async (req, res) => {
     act.lastRunAt = new Date();
     await act.save();
 
-    if (translation !== undefined) {
-      await aggregateChapterFinalText(act.chapterId);
-    }
+    // if (translation !== undefined) {
+    //   await aggregateChapterFinalText(act.chapterId);
+    // }
 
     res.status(200).json({
       success: true,
@@ -665,6 +685,55 @@ router.delete("/chapters/:chapterId/acts", async (req, res) => {
       "DELETE /api/translation/chapters/:chapterId/acts - Error:",
       error.message,
     );
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post("/chapters/:chapterId/export", async (req, res) => {
+  try {
+    const chapterId = Number(req.params.chapterId);
+    if (!Number.isInteger(chapterId) || chapterId < 1) {
+      return res.status(400).json({ error: "Invalid chapterId" });
+    }
+
+    const chapter = await aggregateChapterFinalText(chapterId);
+    if (!chapter) {
+      return res.status(404).json({ error: "Chapter not found" });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Chapter exported successfully",
+      data: chapter,
+    });
+  } catch (error) {
+    console.error("POST /api/translation/chapters/:chapterId/export - Error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.delete("/chapters/:chapterId/export", async (req, res) => {
+  try {
+    const chapterId = Number(req.params.chapterId);
+    if (!Number.isInteger(chapterId) || chapterId < 1) {
+      return res.status(400).json({ error: "Invalid chapterId" });
+    }
+
+    const chapter = await Chapter.findByPk(chapterId);
+    if (!chapter) {
+      return res.status(404).json({ error: "Chapter not found" });
+    }
+
+    chapter.finalText = null;
+    await chapter.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Chapter result deleted successfully",
+      data: chapter,
+    });
+  } catch (error) {
+    console.error("DELETE /api/translation/chapters/:chapterId/export - Error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });

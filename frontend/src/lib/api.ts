@@ -40,6 +40,7 @@ export interface Act {
     linguistic?: any;
     narrative?: any;
   };
+  translatedText: string | null;
   status: string;
   lastRunAt: string | null;
   llmMeta: Record<string, unknown> | null;
@@ -534,6 +535,29 @@ export async function deleteAllActs(
     method: "DELETE",
   });
   return result.data ?? result;
+}
+
+export async function exportChapterResult(
+  chapterId: number,
+): Promise<Chapter> {
+  const result = await requestJson<ApiItemResponse<Chapter>>(
+    `/translation/chapters/${chapterId}/export`,
+    {
+      method: "POST",
+    },
+  );
+  return result.data;
+}
+
+export async function deleteChapterResult(
+  chapterId: number,
+): Promise<void> {
+  await requestJson<ApiItemResponse<void>>(
+    `/translation/chapters/${chapterId}/export`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
 /**

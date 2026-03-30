@@ -337,6 +337,16 @@ export function SeriesDetail() {
                   <span className="text-[9px] text-[#a0908b] font-sans ml-4">
                     {formatDate(chapter.createdAt)}
                   </span>
+                  {chapter.finalText && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => navigate(`/series/${series.id}/chapter/${chapter.id}/result`)}
+                      className="h-7 px-3 text-[9px] tracking-widest uppercase font-sans border-[#d8cdbd] text-[#2f7a46] hover:bg-[#ebf5ed] hover:text-[#1a4d2e] bg-transparent rounded-sm transition-all"
+                    >
+                      VIEW RESULT
+                    </Button>
+                  )}
                   <Button
                     type="button"
                     variant="outline"

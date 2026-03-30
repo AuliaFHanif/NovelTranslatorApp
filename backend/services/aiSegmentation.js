@@ -172,7 +172,27 @@ function smoothBoundaries(boundaries, paragraphs) {
     accumulatedTokens += spanTokens;
 
     const isFinal = boundary === maxParagraph;
-    if (isFinal || accumulatedTokens >= MIN_TOKENS_PER_ACT) {
+    if (isFinal) {
+      // Mechanical check for last act size (User requested < 10 words)
+      let lastActText = "";
+      for (let i = lastBoundary; i < boundary; i++) {
+        lastActText += (paragraphs[i]?.text || "") + " ";
+      }
+
+      const cjkMatch = lastActText.match(/[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]/g);
+      const cjkCount = cjkMatch ? cjkMatch.length : 0;
+      const nonCjkText = lastActText.replace(/[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]/g, " ");
+      const wordMatch = nonCjkText.match(/\b\w+\b/g);
+      const wordCount = wordMatch ? wordMatch.length : 0;
+      const totalWords = cjkCount + wordCount;
+
+      if (spanFiltered.length > 0 && totalWords < 10) {
+        // Combine into previous act by updating its boundary to the end
+        spanFiltered[spanFiltered.length - 1] = maxParagraph;
+      } else {
+        spanFiltered.push(boundary);
+      }
+    } else if (accumulatedTokens >= MIN_TOKENS_PER_ACT) {
       spanFiltered.push(boundary);
       lastBoundary = boundary;
       accumulatedTokens = 0;

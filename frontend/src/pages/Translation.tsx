@@ -17,9 +17,11 @@ import {
   runArchitectPhase,
   runChapterAnalysis,
   streamActTranslation,
+  getActTranslationPrompt,
   runChapterPass,
   updateAct,
   deleteAllActs,
+  exportChapterResult,
   type Act,
   type AIModel,
   type TranslationChapter,
@@ -27,6 +29,7 @@ import {
 } from "../lib/api";
 import { showError, showInfo, showSuccess } from "../lib/notifications";
 import { GlossaryApprovalDialog } from "../components/GlossaryApprovalDialog";
+import { PromptViewerDialog } from "../components/PromptViewerDialog";
 
 export function Translation() {
   const [searchParams] = useSearchParams();
@@ -45,6 +48,9 @@ export function Translation() {
   >("idle");
   const [extractedTerms, setExtractedTerms] = useState<GlossaryCandidate[]>([]);
   const [isGlossaryDialogOpen, setIsGlossaryDialogOpen] = useState(false);
+  const [isPreviewPromptOpen, setIsPreviewPromptOpen] = useState(false);
+  const [currentPrompt, setCurrentPrompt] = useState<Array<{ role: string; content: string }> | null>(null);
+  const [isFetchingPrompt, setIsFetchingPrompt] = useState(false);
 
   const seriesId = Number(searchParams.get("seriesId") || "0");
   const chapterId = Number(searchParams.get("chapterId") || "0");
@@ -173,6 +179,27 @@ export function Translation() {
       );
     } finally {
       setIsRunningPass(false);
+    }
+  }
+
+  async function handleShowPrompt() {
+    if (!selectedAct) {
+      await showInfo("No Act Selected", "Select an act before viewing prompt.");
+      return;
+    }
+
+    try {
+      setIsFetchingPrompt(true);
+      const data = await getActTranslationPrompt(selectedAct.id, modelName);
+      setCurrentPrompt(data.messages);
+      setIsPreviewPromptOpen(true);
+    } catch (error) {
+      await showError(
+        "Failed to Load Prompt",
+        error instanceof Error ? error.message : "Unable to retrieve prompt context.",
+      );
+    } finally {
+      setIsFetchingPrompt(false);
     }
   }
 
@@ -377,6 +404,26 @@ export function Translation() {
     }
   }
 
+  async function handleExport() {
+    if (!chapter) return;
+    try {
+      setIsSaving(true);
+      const result = await exportChapterResult(chapter.id);
+      setChapter((prev) => prev ? { ...prev, finalText: result.finalText } : null);
+      await showSuccess(
+        "Export Successful",
+        "Chapter final text has been generated from acts, with reasoning blocks removed."
+      );
+    } catch (error) {
+      await showError(
+        "Export Failed",
+        error instanceof Error ? error.message : "Unable to export chapter result."
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   if (isLoadingChapter) {
     return (
       <div className="flex flex-col items-center justify-center w-full h-dvh text-[#807068] font-serif">
@@ -432,6 +479,14 @@ export function Translation() {
             >
               GLOSSARY
             </Link>
+            <Button
+              variant="outline"
+              disabled={isSaving || progress.pass3Done === 0}
+              onClick={() => void handleExport()}
+              className="border-[#d8cdbd] text-[#2f7a46] h-8 text-[9px] tracking-widest rounded-sm px-4 hover:bg-[#ebf5ed] hover:text-[#1a4d2e] bg-transparent font-sans uppercase"
+            >
+              {isSaving ? "EXPORTING..." : "EXPORT RESULT"}
+            </Button>
             <Button
               variant="outline"
               onClick={() => void handleDeleteAllActs()}
@@ -521,9 +576,17 @@ export function Translation() {
                 variant="outline"
                 onClick={() => void handleTranslateAct()}
                 disabled={isRunningPass || !selectedAct || !isLmStudioOnline}
-                className="flex-1 h-8 text-[9px] tracking-[0.1em] bg-[#8b2626] hover:bg-[#701c1c] border-none text-white font-sans uppercase rounded-sm"
+                className="flex-[0.7] h-8 text-[9px] tracking-[0.1em] bg-[#8b2626] hover:bg-[#701c1c] border-none text-white font-sans uppercase rounded-sm"
               >
                 Translate Act
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => void handleShowPrompt()}
+                disabled={isFetchingPrompt || !selectedAct}
+                className="flex-[0.3] h-8 text-[9px] tracking-[0.1em] bg-[#f2eadc]/40 border border-[#d8cdbd] hover:bg-[#f2eadc] text-[#807068] font-sans uppercase rounded-sm"
+              >
+                {isFetchingPrompt ? "..." : "Prompt"}
               </Button>
             </div>
           </div>
@@ -720,6 +783,13 @@ export function Translation() {
         onOpenChange={setIsGlossaryDialogOpen}
         terms={extractedTerms}
         onApproved={() => void loadTranslationChapter()}
+      />
+
+      <PromptViewerDialog
+        isOpen={isPreviewPromptOpen}
+        onOpenChange={setIsPreviewPromptOpen}
+        prompt={currentPrompt}
+        actLabel={selectedAct?.label}
       />
     </div>
   );
