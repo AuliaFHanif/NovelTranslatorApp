@@ -1,17 +1,17 @@
 /**
  * JSON schemas for OpenAI/LM Studio structured output
- * Different schemas for Japanese vs Chinese analysis
+ * Split into Term Extraction and Narrative Analysis passes
  */
 
-const japaneseSchema = {
+// --- TERM EXTRACTION (Shared for both languages) ---
+const termExtractionSchema = {
   type: 'json_schema',
   json_schema: {
-    name: 'japanese_literary_analysis',
+    name: 'term_extraction',
     strict: true,
     schema: {
       type: 'object',
       properties: {
-        // GLOSSARY EXTRACTION
         extractedTerms: {
           type: 'array',
           items: {
@@ -25,9 +25,22 @@ const japaneseSchema = {
             },
             required: ['term', 'type', 'context', 'proposedTranslation']
           }
-        },
+        }
+      },
+      required: ['extractedTerms']
+    }
+  }
+};
 
-        // JAPANESE LINGUISTIC ANALYSIS
+// --- JAPANESE NARRATIVE ANALYSIS ---
+const japaneseNarrativeSchema = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'japanese_narrative_analysis',
+    strict: true,
+    schema: {
+      type: 'object',
+      properties: {
         linguisticAnalysis: {
           type: 'object',
           properties: {
@@ -40,7 +53,8 @@ const japaneseSchema = {
                 frequency: { type: 'number', minimum: 0, maximum: 1 },
                 agentOmission: { type: 'boolean' },
                 examples: { type: 'array', items: { type: 'string' } }
-              }
+              },
+              required: ['frequency', 'agentOmission', 'examples']
             },
 
             onomatopoeia: {
@@ -114,10 +128,9 @@ const japaneseSchema = {
               }
             }
           },
-          required: ['language', 'sentenceStructure', 'onomatopoeia', 'honorifics']
+          required: ['language', 'sentenceStructure', 'onomatopoeia', 'honorifics', 'proDrop']
         },
 
-        // NARRATIVE ANALYSIS
         narrativeAnalysis: {
           type: 'object',
           properties: {
@@ -127,7 +140,8 @@ const japaneseSchema = {
                 pattern: { enum: ['suspense_building', 'quick_burst', 'lingering', 'staccato'] },
                 avgSentenceLength: { type: 'integer' },
                 subordinateClauses: { type: 'number' }
-              }
+              },
+              required: ['pattern', 'avgSentenceLength']
             },
 
             emotionalTone: {
@@ -137,7 +151,8 @@ const japaneseSchema = {
                 intensity: { type: 'number', minimum: 0, maximum: 1 },
                 enryo: { type: 'boolean' },
                 amae: { type: 'boolean' }
-              }
+              },
+              required: ['primary', 'intensity', 'enryo', 'amae']
             },
 
             powerDynamic: {
@@ -152,37 +167,23 @@ const japaneseSchema = {
             emotionalIntensity: { type: 'number', minimum: 0, maximum: 1 },
             primaryEmotion: { type: 'string' }
           },
-          required: ['pacingPattern', 'emotionalIntensity', 'primaryEmotion', 'emotionalTone']
+          required: ['pacingPattern', 'emotionalIntensity', 'primaryEmotion', 'emotionalTone', 'kokyu']
         }
       },
-      required: ['extractedTerms', 'linguisticAnalysis', 'narrativeAnalysis']
+      required: ['linguisticAnalysis', 'narrativeAnalysis']
     }
   }
 };
 
-const chineseSchema = {
+// --- CHINESE NARRATIVE ANALYSIS ---
+const chineseNarrativeSchema = {
   type: 'json_schema',
   json_schema: {
-    name: 'chinese_literary_analysis',
+    name: 'chinese_narrative_analysis',
     strict: true,
     schema: {
       type: 'object',
       properties: {
-        extractedTerms: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              term: { type: 'string' },
-              type: { enum: ['character', 'location', 'organization', 'item', 'concept', 'technique'] },
-              context: { type: 'string' },
-              proposedTranslation: { type: 'string' },
-              confidence: { type: 'number', minimum: 0, maximum: 1 }
-            },
-            required: ['term', 'type', 'context', 'proposedTranslation']
-          }
-        },
-
         linguisticAnalysis: {
           type: 'object',
           properties: {
@@ -194,7 +195,8 @@ const chineseSchema = {
               properties: {
                 frequency: { type: 'number', minimum: 0, maximum: 1 },
                 examples: { type: 'array', items: { type: 'string' } }
-              }
+              },
+              required: ['frequency', 'examples']
             },
 
             fourCharacterIdioms: {
@@ -246,7 +248,7 @@ const chineseSchema = {
               }
             }
           },
-          required: ['language', 'sentenceStructure', 'onomatopoeia']
+          required: ['language', 'sentenceStructure', 'onomatopoeia', 'topicProminence']
         },
 
         narrativeAnalysis: {
@@ -258,7 +260,8 @@ const chineseSchema = {
                 dominantPattern: { enum: ['kuai', 'man', 'alternating'] },
                 kuaiTriggers: { type: 'array', items: { type: 'string' } },
                 manTriggers: { type: 'array', items: { type: 'string' } }
-              }
+              },
+              required: ['dominantPattern', 'kuaiTriggers', 'manTriggers']
             },
 
             faceSystem: {
@@ -307,22 +310,62 @@ const chineseSchema = {
                 directness: { enum: ['direct', 'implied', 'physiological'] },
                 primary: { type: 'string' },
                 intensity: { type: 'number', minimum: 0, maximum: 1 }
-              }
+              },
+              required: ['directness', 'primary', 'intensity']
             },
 
             pacingPattern: { enum: ['kuai', 'man', 'mixed'] },
             emotionalIntensity: { type: 'number', minimum: 0, maximum: 1 },
             primaryEmotion: { type: 'string' }
           },
-          required: ['pacingPattern', 'emotionalIntensity', 'primaryEmotion', 'faceSystem']
+          required: ['pacingPattern', 'emotionalIntensity', 'primaryEmotion', 'faceSystem', 'kuaiMan', 'emotionalExpression']
         }
       },
-      required: ['extractedTerms', 'linguisticAnalysis', 'narrativeAnalysis']
+      required: ['linguisticAnalysis', 'narrativeAnalysis']
+    }
+  }
+};
+
+const polishSchema = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'translation_polish_edits',
+    strict: true,
+    schema: {
+      type: 'object',
+      properties: {
+        edits: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              original: { 
+                type: 'string',
+                description: 'The EXACT word or phrase from the current English translation to be replaced.'
+              },
+              replacement: { 
+                type: 'string',
+                description: 'The updated, refined, or modernized version of that word or phrase.'
+              },
+              reason: { 
+                type: 'string', 
+                description: 'Why this edit is being made (e.g., "modernizing idiom", "improving flow").'
+              }
+            },
+            required: ['original', 'replacement', 'reason']
+          }
+        }
+      },
+      required: ['edits']
     }
   }
 };
 
 module.exports = {
-  ja: japaneseSchema,
-  zh: chineseSchema
+  terms: termExtractionSchema,
+  narrative: {
+    ja: japaneseNarrativeSchema,
+    zh: chineseNarrativeSchema
+  },
+  polish: polishSchema
 };

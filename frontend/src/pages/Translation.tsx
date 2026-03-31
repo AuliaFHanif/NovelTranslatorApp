@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Button } from "../components/ui/button";
-import { Input } from "../components/ui/input";
 import {
   Select,
   SelectContent,
@@ -13,10 +12,11 @@ import {
   getHealthStatus,
   getTranslationChapter,
   listAIModels,
-  LLM_PROXY_ENDPOINT,
+  API_BASE_URL,
+  // ... (omitting lines 17-858 for brevity in this specific tool call, but I will provide the full replacement for the target block)
   runArchitectPhase,
   runChapterAnalysis,
-  streamActTranslation,
+  runActAnalysis,
   getActTranslationPrompt,
   runChapterPass,
   updateAct,
@@ -28,8 +28,10 @@ import {
   type GlossaryCandidate,
 } from "../lib/api";
 import { showError, showInfo, showSuccess } from "../lib/notifications";
+import { Badge } from "../components/ui/badge";
 import { GlossaryApprovalDialog } from "../components/GlossaryApprovalDialog";
 import { PromptViewerDialog } from "../components/PromptViewerDialog";
+import { ActAnalysisCard } from "../components/ActAnalysisCard";
 
 export function Translation() {
   const [searchParams] = useSearchParams();
@@ -49,7 +51,10 @@ export function Translation() {
   const [extractedTerms, setExtractedTerms] = useState<GlossaryCandidate[]>([]);
   const [isGlossaryDialogOpen, setIsGlossaryDialogOpen] = useState(false);
   const [isPreviewPromptOpen, setIsPreviewPromptOpen] = useState(false);
-  const [currentPrompt, setCurrentPrompt] = useState<Array<{ role: string; content: string }> | null>(null);
+  const [currentPrompt, setCurrentPrompt] = useState<Array<{
+    role: string;
+    content: string;
+  }> | null>(null);
   const [isFetchingPrompt, setIsFetchingPrompt] = useState(false);
 
   const seriesId = Number(searchParams.get("seriesId") || "0");
@@ -64,9 +69,16 @@ export function Translation() {
     () => ({
       total: acts.length,
       pass1Done: acts.length, // If acts exist, Architect is done
-      pass2Done: acts.filter((act) => Boolean(act.anatomyProfile?.linguistic)).length,
-      pass3Done: acts.filter((act) => Boolean(act.anatomyProfile?.finalTranslation)).length,
+      pass2Done: acts.filter((act) => Boolean(act.anatomyProfile?.linguistic))
+        .length,
+      pass3Done: acts.filter((act) =>
+        Boolean(act.anatomyProfile?.finalTranslation),
+      ).length,
+      pass4Done: acts.filter((act) =>
+        Boolean(act.anatomyProfile?.pass4Polished),
+      ).length,
     }),
+
     [acts],
   );
   const isLmStudioOnline = apiStatus === "ok";
@@ -102,7 +114,10 @@ export function Translation() {
 
   useEffect(() => {
     setEditableTranslation(
-      selectedAct?.anatomyProfile?.finalTranslation || selectedAct?.anatomyProfile?.draftTranslation || "",
+      selectedAct?.translatedText ||
+        selectedAct?.anatomyProfile?.finalTranslation ||
+        selectedAct?.anatomyProfile?.draftTranslation ||
+        "",
     );
   }, [selectedAct]);
 
@@ -145,9 +160,17 @@ export function Translation() {
     }
   }
 
-  async function handleTranslateAct() {
+  async function handleTranslateAct(pass: 3 | 4 = 3) {
     if (!selectedAct) {
       await showInfo("No Act Selected", "Select an act before translating.");
+      return;
+    }
+
+    if (pass === 4 && !selectedAct.anatomyProfile?.finalTranslation) {
+      await showInfo(
+        "Translate First",
+        "Run Pass 3 (Translate) before polishing.",
+      );
       return;
     }
 
@@ -162,20 +185,56 @@ export function Translation() {
     try {
       setIsRunningPass(true);
       setEditableTranslation(""); // Clear before streaming
-      
-      await streamActTranslation(selectedAct.id, modelName, (chunk) => {
-        setEditableTranslation((prev) => prev + chunk);
-      });
+
+      const url = `${API_BASE_URL}/translation/acts/${selectedAct.id}/stream?model=${encodeURIComponent(modelName)}&pass=${pass}`;
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        throw new Error(`Failed to start stream: ${response.statusText}`);
+      }
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (reader) {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split("\n");
+
+            for (const line of lines) {
+              if (line.startsWith("data: ")) {
+                const dataStr = line.slice(6).trim();
+                if (dataStr === "[DONE]") continue;
+
+                try {
+                  const data = JSON.parse(dataStr);
+                  if (data.content) {
+                    setEditableTranslation((prev) => prev + data.content);
+                  }
+                } catch (e) {
+                  // Partial chunk
+                }
+              }
+            }
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      }
 
       await loadTranslationChapter();
       await showSuccess(
-        "Translation Completed",
-        `Act ${selectedAct.sequence} has been translated.`,
+        pass === 4 ? "Polish Completed" : "Translation Completed",
+        `Act ${selectedAct.sequence} has been ${pass === 4 ? "polished" : "translated"}.`,
       );
     } catch (error) {
       await showError(
-        "Translation Failed",
-        error instanceof Error ? error.message : "Unable to translate act.",
+        "Process Failed",
+        error instanceof Error ? error.message : "Unable to process act.",
       );
     } finally {
       setIsRunningPass(false);
@@ -196,14 +255,73 @@ export function Translation() {
     } catch (error) {
       await showError(
         "Failed to Load Prompt",
-        error instanceof Error ? error.message : "Unable to retrieve prompt context.",
+        error instanceof Error
+          ? error.message
+          : "Unable to retrieve prompt context.",
       );
     } finally {
       setIsFetchingPrompt(false);
     }
   }
 
-  async function handleRunChapterPass(pass: 1 | 2 | 3) {
+  async function handleAnalyzeAct(task: "terms" | "narrative") {
+    if (!selectedAct) {
+      await showInfo("No Act Selected", "Select an act before analyzing.");
+      return;
+    }
+
+    if (!isLmStudioOnline) {
+      await showError(
+        "LM Studio Offline",
+        "Cannot analyze while LM Studio is offline.",
+      );
+      return;
+    }
+
+    try {
+      setIsRunningPass(true);
+      const result = await runActAnalysis(selectedAct.id, {
+        model: modelName,
+        task,
+      });
+
+      await loadTranslationChapter();
+
+      if (result.failed && result.failed.length > 0) {
+        await showError(
+          "Analysis Failed",
+          `${result.failed[0].label}: ${result.failed[0].error}`,
+        );
+      }
+
+      if (result.terms && result.terms.length > 0) {
+        setExtractedTerms(result.terms);
+        setIsGlossaryDialogOpen(true);
+      } else if (task === "terms") {
+        await showSuccess(
+          "Term Extraction Complete",
+          "No new terms identified in this act.",
+        );
+      } else if (task === "narrative") {
+        await showSuccess(
+          "Narrative Analysis Complete",
+          "Analysis profile updated.",
+        );
+      }
+    } catch (error) {
+      await showError(
+        "Analysis Failed",
+        error instanceof Error ? error.message : "Unable to analyze act.",
+      );
+    } finally {
+      setIsRunningPass(false);
+    }
+  }
+
+  async function handleRunChapterPass(
+    pass: 1 | 2 | 3 | 4,
+    task: "all" | "terms" | "narrative" = "all",
+  ) {
     if (!chapter) {
       return;
     }
@@ -222,11 +340,12 @@ export function Translation() {
       // Pass 1: Architect (segment chapter into acts)
       if (pass === 1) {
         if (progress.total > 0) {
-          await showInfo(
-            "Already Segmented",
-            "Acts already exist. Delete all acts first to re-segment.",
+          const confirmed = window.confirm(
+            `Acts already exist for this chapter. Are you sure you want to delete all ${progress.total} acts and re-segment? Current translations and analysis WILL BE LOST.`,
           );
-          return;
+          if (!confirmed) return;
+
+          await deleteAllActs(chapter.id);
         }
         const result = await runArchitectPhase(chapter.id);
         await loadTranslationChapter();
@@ -240,30 +359,81 @@ export function Translation() {
       // Pass 2: Lexicographer (analysis + term extraction)
       if (pass === 2) {
         if (progress.total === 0) {
-          await showError("No Acts", "Run Pass 1 first to segment the chapter into acts.");
+          await showError(
+            "No Acts",
+            "Run Pass 1 first to segment the chapter into acts.",
+          );
           return;
         }
         const result = await runChapterAnalysis(chapter.id, {
           model: modelName,
+          task,
         });
         await loadTranslationChapter();
-        
+
+        if (result.failed && result.failed.length > 0) {
+          await showError(
+            "Analysis Incomplete",
+            `${result.processed} acts analyzed, but ${result.failed.length} act(s) failed (e.g., ${result.failed[0].label}). Check LM Studio for token limits or JSON errors.`,
+          );
+        }
+
         if (result.terms && result.terms.length > 0) {
-            setExtractedTerms(result.terms);
-            setIsGlossaryDialogOpen(true);
-        } else {
-            await showSuccess(
-                "Lexicographer Completed",
-                `Analyzed ${result.processed || 0} act(s)${result.failed?.length > 0 ? `, ${result.failed.length} failed` : ""}. ${result.terms?.length ? `${result.terms.length} new terms extracted.` : "No new terms identified."}`,
-            );
+          setExtractedTerms(result.terms);
+          setIsGlossaryDialogOpen(true);
+        } else if (result.failed?.length === 0) {
+          await showSuccess(
+            "Lexicographer Completed",
+            `Analyzed all ${result.processed || 0} act(s). No new terms identified.`,
+          );
         }
 
         return;
       }
 
+      // Pass 4: Polish
+      if (pass === 4) {
+        if (progress.total === 0) {
+          await showError(
+            "No Acts",
+            "Run Pass 1 first to segment the chapter into acts.",
+          );
+          return;
+        }
+        if (progress.pass3Done < progress.total) {
+          await showInfo(
+            "Translate First",
+            "Ensure all acts are translated (Pass 3) before polishing.",
+          );
+          return;
+        }
+
+        const result = await runChapterPass(chapter.id, 4, {
+          model: modelName,
+        });
+        await loadTranslationChapter();
+
+        if (result.failed > 0) {
+          await showError(
+            "Polish Completed With Errors",
+            `${result.completed} acts succeeded, ${result.failed} failed.`,
+          );
+          return;
+        }
+
+        await showSuccess(
+          "Polish Completed",
+          `All ${result.completed} act(s) polished.`,
+        );
+        return;
+      }
+
       // Pass 3: Translation
       if (progress.total === 0) {
-        await showError("No Acts", "Run Pass 1 first to segment the chapter into acts.");
+        await showError(
+          "No Acts",
+          "Run Pass 1 first to segment the chapter into acts.",
+        );
         return;
       }
 
@@ -409,15 +579,19 @@ export function Translation() {
     try {
       setIsSaving(true);
       const result = await exportChapterResult(chapter.id);
-      setChapter((prev) => prev ? { ...prev, finalText: result.finalText } : null);
+      setChapter((prev) =>
+        prev ? { ...prev, finalText: result.finalText } : null,
+      );
       await showSuccess(
         "Export Successful",
-        "Chapter final text has been generated from acts, with reasoning blocks removed."
+        "Chapter final text has been generated from acts, with reasoning blocks removed.",
       );
     } catch (error) {
       await showError(
         "Export Failed",
-        error instanceof Error ? error.message : "Unable to export chapter result."
+        error instanceof Error
+          ? error.message
+          : "Unable to export chapter result.",
       );
     } finally {
       setIsSaving(false);
@@ -447,11 +621,12 @@ export function Translation() {
   }
 
   return (
-    <div className="flex flex-col w-full h-dvh pt-20 px-8 pb-0 overflow-hidden">
-      <div className="flex flex-col border-b border-[#d8cdbd] pb-3 mb-3 shrink-0">
+    <div className="flex flex-col w-full h-dvh pt-20 px-8 pb-0 overflow-hidden bg-[#F8F5F2]">
+      {/* Header Bar */}
+      <div className="flex flex-col border-b border-[#d8cdbd] pb-3 mb-4 shrink-0">
         <div className="flex items-center text-[10px] tracking-[0.2em] font-sans uppercase mb-4 text-[#807068]">
           <Link
-            to="/library"
+            to={`/series/${seriesId}`}
             className="hover:text-[#4A3D39] transition-colors"
           >
             &larr; {chapter.Series.title}
@@ -461,11 +636,72 @@ export function Translation() {
         </div>
 
         <div className="flex justify-between items-end">
-          <div className="text-[10px] tracking-[0.2em] font-sans uppercase text-[#807068]">
-            {chapter.title || `Chapter ${chapter.number}`} &bull;{" "}
-            {progress.total} ACTS
+          <div className="flex flex-col gap-1">
+            <div className="text-[12px] font-bold font-sans uppercase text-[#4A3D39] tracking-widest">
+              {chapter.title || `Chapter ${chapter.number}`}
+            </div>
+            <div className="text-[9px] tracking-[0.1em] font-sans text-[#a0908b] uppercase">
+              P1 {progress.total > 0 ? "DONE" : "PENDING"} / P2{" "}
+              {progress.pass2Done} / P3 {progress.pass3Done} / P4{" "}
+              {progress.pass4Done} &bull; {progress.total} ACTS
+            </div>
           </div>
           <div className="flex gap-2">
+            <Button
+              variant="outline"
+              onClick={() => void handleRunChapterPass(1)}
+              disabled={isRunningPass || !isLmStudioOnline}
+              className={`${progress.total === 0 ? "bg-[#d0a080] hover:bg-[#bd8c6c] border-none text-white font-bold" : "bg-transparent text-[#d0a080] border-[#d0a080] hover:bg-[#fcf8f4]"} h-8 text-[9px] tracking-widest rounded-sm px-4 font-sans uppercase shadow-sm border`}
+            >
+              {isRunningPass
+                ? "SEGMENTING..."
+                : progress.total === 0
+                  ? "SEGMENT CHAPTER"
+                  : "RE-SEGMENT CHAPTER"}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void handleRunChapterPass(2, "terms")}
+              disabled={
+                isRunningPass || !isLmStudioOnline || progress.total === 0
+              }
+              className="bg-transparent text-[#2f7a46] border-[#2f7a46] hover:bg-[#ebf5ed] h-8 text-[9px] tracking-widest rounded-sm px-4 font-sans uppercase shadow-sm border"
+            >
+              EXTRACT TERMS
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void handleRunChapterPass(2, "all")}
+              disabled={
+                isRunningPass || !isLmStudioOnline || progress.total === 0
+              }
+              className="bg-transparent text-[#8B2626] border-[#8B2626] hover:bg-[#fcf0f0] h-8 text-[9px] tracking-widest rounded-sm px-4 font-sans uppercase shadow-sm border"
+            >
+              FULL ANALYSIS
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void handleRunChapterPass(3)}
+              disabled={
+                isRunningPass || !isLmStudioOnline || progress.total === 0
+              }
+              className="bg-transparent text-[#5B3E96] border-[#5B3E96] hover:bg-[#f3f0fc] h-8 text-[9px] tracking-widest rounded-sm px-4 font-sans uppercase shadow-sm border"
+            >
+              TRANSLATE ALL
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void handleRunChapterPass(4)}
+              disabled={
+                isRunningPass || !isLmStudioOnline || progress.total === 0
+              }
+              className="bg-transparent text-[#d48c29] border-[#d48c29] hover:bg-[#fcf5eb] h-8 text-[9px] tracking-widest rounded-sm px-4 font-sans uppercase shadow-sm border"
+            >
+              POLISH ALL
+            </Button>
+
+            <div className="w-[1px] h-8 bg-[#d8cdbd] mx-1" />
+
             <Button
               variant="outline"
               onClick={() => void loadTranslationChapter()}
@@ -485,296 +721,335 @@ export function Translation() {
               onClick={() => void handleExport()}
               className="border-[#d8cdbd] text-[#2f7a46] h-8 text-[9px] tracking-widest rounded-sm px-4 hover:bg-[#ebf5ed] hover:text-[#1a4d2e] bg-transparent font-sans uppercase"
             >
-              {isSaving ? "EXPORTING..." : "EXPORT RESULT"}
+              {isSaving ? "EXPORTING..." : "EXPORT"}
             </Button>
             <Button
               variant="outline"
               onClick={() => void handleDeleteAllActs()}
               className="border-[#d8cdbd] text-[#c68080] h-8 text-[9px] tracking-widest rounded-sm px-4 hover:bg-[#ffeaea] hover:text-[#a04040] bg-transparent font-sans uppercase"
             >
-              DELETE ALL ACTS
+              RESET CHAPTER
             </Button>
           </div>
         </div>
       </div>
 
-      <div className="flex-1 flex gap-4 min-h-0 mb-4 overflow-hidden">
-        <div className="flex-1 flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm opacity-90 min-h-0">
-          <div className="flex justify-between items-center px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30">
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase">
-                {chapter.Series.language === "zh"
-                  ? "CHINESE SOURCE"
-                  : "JAPANESE SOURCE"}
-              </span>
-              <span className="text-[8px] font-sans text-[#c8a080] uppercase tracking-widest ml-2">
-                🔒 LOCKED
-              </span>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-[9px] tracking-widest font-sans text-[#a0908b]">
-                {formatCharCount(chapter.rawText)}
-              </span>
-              <span className="text-[8px] font-sans text-[#a0908b] uppercase tracking-widest">
-                CHAPTER INPUT
-              </span>
-            </div>
+      <div className="flex-1 flex gap-6 min-h-0 mb-6 overflow-hidden">
+        {/* SIDEBAR: Unified Act Selector */}
+        <div className="w-64 flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm opacity-90 min-h-0 shrink-0">
+          <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
+            <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
+              ACT LIST
+            </span>
           </div>
-          <div className="flex-1 p-6 overflow-y-auto whitespace-pre-wrap wrap-break-word text-base leading-[2.2] font-serif text-[#4A3D39]">
-            {chapter.rawText || "No source text available."}
-          </div>
-        </div>
+          <div className="flex-1 overflow-y-auto p-1 py-2">
+            {acts.map((act) => {
+              const termStatus =
+                act.anatomyProfile?.termExtractionStatus || "pending";
+              const analysisStatus =
+                act.anatomyProfile?.actAnalysisStatus ||
+                (act.anatomyProfile?.linguistic ? "success" : "pending");
+              const hasTranslation = Boolean(
+                act.anatomyProfile?.finalTranslation || act.translatedText,
+              );
+              const hasPolish = Boolean(act.Polishes?.[0]?.Edits?.length);
 
-        <div className="flex-1 flex flex-col gap-4 min-h-0">
-          <div className="flex-[0.45] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm opacity-90 min-h-0">
-            <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between">
-              <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase">
-                {progress.total} ACTS
-              </span>
-              <span className="text-[9px] tracking-[0.1em] font-sans text-[#a0908b] uppercase">
-                P1 {progress.pass1Done} / P2 {progress.pass2Done} / P3{" "}
-                {progress.pass3Done}
-              </span>
-            </div>
-            <div className="flex-1 overflow-y-auto p-1 py-2">
-              {acts.map((act) => (
+              return (
                 <div
                   key={act.id}
-                  className={`flex justify-between items-center px-4 py-2.5 mx-1 rounded-sm text-xs font-serif cursor-pointer ${
+                  className={`group flex flex-col px-4 py-3 mx-1 mb-1 rounded-sm cursor-pointer transition-all ${
                     selectedActId === act.id
-                      ? "bg-[#f2eadc] text-[#4A3D39] border border-[#d8cdbd]"
+                      ? "bg-[#f2eadc] text-[#4A3D39] border border-[#d8cdbd] shadow-sm"
                       : "text-[#807068] hover:bg-[#f5efe6] border border-transparent"
                   }`}
                   onClick={() => setSelectedActId(act.id)}
                 >
-                  <span className="font-bold font-sans text-[10px]">
-                    Act {act.sequence} ({act.label})
-                  </span>
-                  <span className="text-[9px] font-sans text-[#a0908b]">
-                    &mdash; {(act.rawText || "").length}
-                  </span>
+                  <div className="flex justify-between items-center mb-1">
+                    <span
+                      className={`text-[10px] font-sans uppercase tracking-widest ${selectedActId === act.id ? "font-bold text-[#8B2626]" : ""}`}
+                    >
+                      Act {act.sequence}
+                    </span>
+                    <div className="flex gap-1.5 items-center">
+                      <div
+                        className={`w-1.5 h-1.5 rounded-full ${termStatus === "success" ? "bg-emerald-500" : termStatus === "error" ? "bg-red-500" : "bg-gray-300"}`}
+                        title={`Term Extraction: ${termStatus}`}
+                      />
+                      <div
+                        className={`w-1.5 h-1.5 rounded-full ${analysisStatus === "success" ? "bg-blue-400" : analysisStatus === "error" ? "bg-red-500" : "bg-gray-300"}`}
+                        title={`Act Analysis: ${analysisStatus}`}
+                      />
+                      <div
+                        className={`w-1.5 h-1.5 rounded-full ${hasTranslation ? "bg-purple-500" : "bg-gray-300"}`}
+                        title={
+                          hasTranslation ? "Translated" : "Pending Translation"
+                        }
+                      />
+                      <div
+                        className={`w-1.5 h-1.5 rounded-full ${hasPolish ? "bg-amber-500" : "bg-gray-300"}`}
+                        title={hasPolish ? "Polished" : "Pending Polish"}
+                      />
+                    </div>
+                  </div>
+                  <div className="text-[11px] font-serif italic truncate opacity-80">
+                    {act.label}
+                  </div>
+                  <div className="mt-2 text-[8px] font-sans text-[#a0908b] group-hover:text-[#4A3D39] transition-colors">
+                    {(act.rawText || "").length} chars &bull;{" "}
+                    {hasTranslation ? "Ready" : "Pending"}
+                  </div>
                 </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex-[0.55] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm opacity-90 min-h-0">
-            <div className="px-4 py-2 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
-              <span className="text-[10px] font-bold font-sans text-[#4A3D39]">
-                Act {selectedAct?.sequence || "-"} ({selectedAct?.label || "-"}) Source
-              </span>
-              <span className="text-[9px] tracking-[0.1em] font-sans text-[#a0908b]">
-                {formatCharCount(selectedAct?.rawText)}
-              </span>
-            </div>
-            <div className="flex-1 p-5 overflow-y-auto whitespace-pre-wrap wrap-break-word text-[13px] leading-loose font-serif text-[#4A3D39]">
-              {selectedAct?.rawText ||
-                "Select an act to view its source text here."}
-            </div>
-            <div className="flex justify-between p-2 pt-0 gap-2 shrink-0 bg-[#FBF9F6]">
-              <Button
-                variant="outline"
-                onClick={() => void handleTranslateAct()}
-                disabled={isRunningPass || !selectedAct || !isLmStudioOnline}
-                className="flex-[0.7] h-8 text-[9px] tracking-[0.1em] bg-[#8b2626] hover:bg-[#701c1c] border-none text-white font-sans uppercase rounded-sm"
-              >
-                Translate Act
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => void handleShowPrompt()}
-                disabled={isFetchingPrompt || !selectedAct}
-                className="flex-[0.3] h-8 text-[9px] tracking-[0.1em] bg-[#f2eadc]/40 border border-[#d8cdbd] hover:bg-[#f2eadc] text-[#807068] font-sans uppercase rounded-sm"
-              >
-                {isFetchingPrompt ? "..." : "Prompt"}
-              </Button>
-            </div>
+              );
+            })}
           </div>
         </div>
 
-        <div className="flex-1 flex flex-col gap-4 min-h-0">
-          <div className="flex-[0.45] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm opacity-90 min-h-0">
-            <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between">
-              <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase">
-                {progress.total} TRANSLATIONS
-              </span>
-              <span className="text-[9px] tracking-[0.1em] font-sans text-[#a0908b] uppercase">
-                P3 READY: {progress.pass3Done}
-              </span>
+        {/* MAIN WORKSPACE */}
+        <div className="flex-1 flex gap-4 min-h-0 overflow-hidden">
+          {/* Column 1: Source & Analysis */}
+          <div className="flex-[0.4] flex flex-col gap-4 min-h-0">
+            {/* Source Card */}
+            <div className="flex-[0.5] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0">
+              <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
+                <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
+                  Act Source
+                </span>
+                <span className="text-[9px] tracking-widest font-sans text-[#a0908b]">
+                  {formatCharCount(selectedAct?.rawText)}
+                </span>
+              </div>
+              <div className="flex-1 p-5 overflow-y-auto whitespace-pre-wrap text-[13px] leading-relaxed font-serif text-[#4A3D39] bg-white/40">
+                {selectedAct?.rawText || "Select an act to begin."}
+              </div>
             </div>
-            <div className="flex-1 overflow-y-auto p-1 py-2">
-              {acts.map((act) => {
-                const output = act.anatomyProfile?.finalTranslation || act.anatomyProfile?.draftTranslation || "";
-                return (
-                  <div
-                    key={act.id}
-                    className={`flex justify-between items-center px-4 py-2.5 mx-1 rounded-sm text-xs font-serif cursor-pointer ${
-                      selectedActId === act.id
-                        ? "bg-[#f2eadc] text-[#4A3D39] border border-[#d8cdbd]"
-                        : "text-[#807068] hover:bg-[#f5efe6] border border-transparent"
-                    }`}
-                    onClick={() => setSelectedActId(act.id)}
+
+            {/* Analysis Card */}
+            <div className="flex-[0.5] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0 relative">
+              <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center sticky top-0 z-10">
+                <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
+                  Analysis Run
+                </span>
+                <div className="flex gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void handleAnalyzeAct("terms")}
+                    disabled={isRunningPass || !selectedAct}
+                    className="h-5 text-[8px] text-[#2f7a46] p-0 font-sans uppercase font-bold"
                   >
-                    <span className="font-bold font-sans text-[10px]">
-                      Act {act.sequence} ({act.label})
-                    </span>
-                    <span className="text-[9px] font-sans text-[#a0908b]">
-                      &mdash; {output.length}
-                    </span>
-                  </div>
-                );
-              })}
+                    {isRunningPass ? "..." : "EXTRACT ACT TERMS"}
+                  </Button>
+                  <div className="w-[1px] h-3 bg-[#d8cdbd] self-center" />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void handleAnalyzeAct("narrative")}
+                    disabled={isRunningPass || !selectedAct}
+                    className="h-5 text-[8px] text-[#8B2626] p-0 font-sans uppercase"
+                  >
+                    {isRunningPass ? "..." : "NAV ANALYSIS"}
+                  </Button>
+                </div>
+              </div>
+              <div className="flex-1 p-5 overflow-y-auto bg-white/20">
+                <ActAnalysisCard
+                  linguistic={selectedAct?.anatomyProfile?.linguistic}
+                  narrative={selectedAct?.anatomyProfile?.narrative}
+                />
+              </div>
             </div>
           </div>
 
-          <div className="flex-[0.55] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm opacity-90 min-h-0">
-            <div className="px-4 py-2 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
-              <span className="text-[10px] font-bold font-sans text-[#4A3D39]">
-                Act {selectedAct?.sequence || "-"} ({selectedAct?.label || "-"}) Translation
-              </span>
-              <span className="text-[9px] tracking-[0.1em] font-sans text-[#a0908b]">
-                {formatCharCount(editableTranslation)}
-              </span>
+          {/* Column 2: Translation & Polish */}
+          <div className="flex-[0.6] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0">
+            <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
+              <div className="flex items-center gap-3">
+                <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
+                  Translation Editor
+                </span>
+                <Badge
+                  variant="outline"
+                  className="h-4 text-[8px] bg-white/50 border-[#D8CDBD] text-[#8B2626]"
+                >
+                  PASS 3
+                </Badge>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[9px] tracking-widest font-sans text-[#a0908b] mr-2">
+                  {formatCharCount(editableTranslation)}
+                </span>
+                <Button
+                  variant="outline"
+                  onClick={() => void handleTranslateAct(3)}
+                  disabled={isRunningPass || !selectedAct || !isLmStudioOnline}
+                  className="h-6 text-[8px] tracking-[0.1em] bg-[#8B2626] hover:bg-[#701c1c] border-none text-white font-sans uppercase rounded-sm px-3"
+                >
+                  Translate
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => void handleShowPrompt()}
+                  disabled={isFetchingPrompt || !selectedAct}
+                  className="h-6 text-[8px] tracking-[0.1em] bg-[#f2eadc]/40 border border-[#d8cdbd] hover:bg-[#f2eadc] text-[#807068] font-sans uppercase rounded-sm px-3"
+                >
+                  Prompt
+                </Button>
+              </div>
             </div>
+
             <textarea
               value={editableTranslation}
               onChange={(event) => setEditableTranslation(event.target.value)}
-              className="flex-1 p-6 resize-none outline-none bg-transparent font-serif text-[#4A3D39] text-[13px] leading-relaxed"
+              className="flex-1 p-6 pb-2 resize-none outline-none bg-white font-serif text-[#4A3D39] text-base leading-relaxed selection:bg-rose-100 placeholder:italic placeholder:text-[#A0908B]/50"
               placeholder="Run Pass 3 on this act to generate translation..."
             />
-            <div className="flex justify-between p-2 pt-0 gap-2 shrink-0 bg-[#FBF9F6]">
+
+            <div className="flex justify-end p-2 gap-2 border-t border-[#d8cdbd]/50 bg-white/50 shrink-0">
+              <Button
+                variant="ghost"
+                onClick={() => void handleCopyTranslation()}
+                className="h-7 text-[9px] tracking-[0.1em] text-[#a0908b] hover:text-[#4A3D39] font-sans uppercase"
+              >
+                Copy Text
+              </Button>
               <Button
                 variant="outline"
                 onClick={() => void handleSaveTranslation()}
                 disabled={isSaving || !selectedAct}
-                className="flex-1 h-8 text-[9px] tracking-[0.1em] bg-transparent border border-[#e8dfcf] hover:bg-[#f2eadc] text-[#d0c0b8] font-sans uppercase rounded-sm"
+                className="h-7 text-[9px] tracking-[0.1em] border-[#d8cdbd] text-[#807068] hover:bg-[#f2eadc] font-sans uppercase px-6"
               >
-                Save
+                {isSaving ? "Saving..." : "Save Selection"}
               </Button>
-              <Button
-                variant="outline"
-                onClick={() => void handleCopyTranslation()}
-                className="flex-1 h-8 text-[9px] tracking-[0.1em] bg-transparent border border-[#e8dfcf] hover:bg-[#f2eadc] text-[#d0c0b8] font-sans uppercase rounded-sm"
-              >
-                Copy
-              </Button>
+            </div>
+
+            {/* Sub-panel: Polish Edits for this Act */}
+            <div className="h-1/3 flex flex-col border-t border-[#d8cdbd] bg-[#f9f7f4] min-h-0">
+              <div className="px-4 py-2 border-b border-[#d8cdbd] shrink-0 flex justify-between items-center">
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
+                    Act Polish Refinements
+                  </span>
+                  <Badge variant="secondary" className="h-4 text-[8px]">
+                    PASS 4
+                  </Badge>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void handleTranslateAct(4)}
+                  disabled={isRunningPass || !selectedAct || !isLmStudioOnline}
+                  className="h-5 text-[8px] text-[#8B2626] p-0 font-sans uppercase"
+                >
+                  Run Polish
+                </Button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-4">
+                {selectedAct?.Polishes?.[0]?.Edits?.length ? (
+                  <div className="grid grid-cols-1 gap-3">
+                    {selectedAct.Polishes[0].Edits.map(
+                      (edit: any, idx: number) => (
+                        <div
+                          key={idx}
+                          className={`p-3 border rounded-sm bg-white text-[11px] font-serif shadow-sm ${edit.applied === false ? "opacity-60 border-dashed border-[#d8cdbd]" : "border-[#e8dfcf]"}`}
+                        >
+                          <div className="flex justify-between items-start gap-4">
+                            <div className="flex-1">
+                              <div className="line-through text-[#8b2626]/60 italic mb-1">
+                                "{edit.original}"
+                              </div>
+                              <div className="font-bold text-[#2f7a46] mb-2">
+                                "{edit.replacement}"
+                              </div>
+                              <div className="text-[9px] font-sans text-[#a0908b] bg-[#f2eadc]/20 p-1 px-2 rounded-sm inline-block">
+                                {edit.reason}
+                              </div>
+                            </div>
+                            {edit.applied !== false && (
+                              <Badge
+                                variant="outline"
+                                className="text-[8px] border-[#2f7a46] text-[#2f7a46] bg-[#ebf5ed]"
+                              >
+                                APPLIED
+                              </Badge>
+                            )}
+                          </div>
+                        </div>
+                      ),
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full text-[#a0908b] italic text-[11px] text-center px-4">
+                    No polish refinements for this act. Run Pass 4 to see
+                    improvements.
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Footer Bar */}
-      <div className="shrink-0 flex items-center justify-between border-y border-[#d8cdbd] py-3 -mx-8 px-8 bg-[#FBF9F6]">
-        <div className="flex items-center gap-6 flex-1">
+      {/* Footer / Model Selector Bar */}
+      <div className="shrink-0 flex items-center justify-between border-t border-[#d8cdbd] py-2.5 -mx-8 px-8 bg-[#FBF9F6]">
+        <div className="flex items-center gap-6">
           <div className="flex items-center gap-3">
             <div
-              className={`w-2 h-2 rounded-full ${
+              className={`w-2 h-2 rounded-full shadow-[0_0_8px_rgba(0,0,0,0.1)] ${
                 apiStatus === "ok"
-                  ? "bg-[#2f7a46]"
-                  : apiStatus === "error"
-                    ? "bg-[#8b2626]"
-                    : apiStatus === "testing"
-                      ? "bg-[#c8a080]"
-                      : "bg-[#a0908b]"
+                  ? "bg-[#2f7a46] animate-pulse"
+                  : apiStatus === "testing"
+                    ? "bg-[#d8c080] animate-bounce"
+                    : "bg-[#8b2626]"
               }`}
-            ></div>
-            <span className="text-[9px] tracking-[0.2em] font-sans text-[#807068] uppercase">
-              API
-            </span>
-            <Input
-              value={LLM_PROXY_ENDPOINT}
-              readOnly
-              className="h-8 w-64 border-[#d8cdbd] bg-white text-xs font-mono text-[#5c504b] focus-visible:ring-[#a0908b] rounded-sm"
             />
+            <span className="text-[10px] font-sans tracking-widest text-[#807068] uppercase">
+              {apiStatus === "ok"
+                ? "CONNECTED"
+                : apiStatus === "testing"
+                  ? "TESTING..."
+                  : "DISCONNECTED"}
+            </span>
           </div>
-          <div className="flex items-center gap-3">
-            <span className="text-[9px] tracking-[0.2em] font-sans text-[#807068] uppercase">
+
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] font-sans text-[#a0908b] uppercase tracking-widest">
               MODEL
             </span>
-            <Select
-              value={modelName || ""}
-              onValueChange={setModelName}
-              disabled={isLoadingModels || aiModels.length === 0}
-            >
-              <SelectTrigger className="h-8 w-48 border-[#d8cdbd] bg-white focus:ring-1 focus:ring-[#a0908b] rounded-sm">
-                <SelectValue
-                  placeholder={
-                    isLoadingModels
-                      ? "Loading..."
-                      : aiModels.length === 0
-                        ? "No models"
-                        : "Select model"
-                  }
-                />
+            <Select value={modelName} onValueChange={setModelName}>
+              <SelectTrigger className="h-7 w-[200px] border-[#d8cdbd] bg-transparent text-[10px] font-sans rounded-none focus:ring-0">
+                <SelectValue placeholder="Select Model" />
               </SelectTrigger>
-              {aiModels.length > 0 && (
-                <SelectContent className="bg-white border-[#d8cdbd]">
-                  {aiModels.map((model) => (
-                    <SelectItem key={model.id} value={model.modelId}>
-                      <span className="text-xs font-mono">
-                        {model.name} • {model.modelId}
-                      </span>
+              <SelectContent>
+                {isLoadingModels ? (
+                  <SelectItem value="loading" disabled>
+                    Loading models...
+                  </SelectItem>
+                ) : (
+                  aiModels.map((m) => (
+                    <SelectItem key={m.id} value={m.modelId}>
+                      {m.name}
                     </SelectItem>
-                  ))}
-                </SelectContent>
-              )}
+                  ))
+                )}
+              </SelectContent>
             </Select>
           </div>
-          <Button
-            variant="outline"
-            onClick={handleTestConnection}
-            className="h-8 text-[9px] tracking-[0.1em] bg-transparent hover:bg-[#f2eadc] border-[#d8cdbd] text-[#807068] font-sans uppercase rounded-sm px-6"
-          >
-            {apiStatus === "testing" ? "TESTING..." : "TEST"}
-          </Button>
         </div>
 
-        <div className="flex items-center gap-6">
-          <span className="text-[9px] tracking-[0.1em] font-sans text-[#a0908b] uppercase">
-            {progress.total} ACTS &bull; GLOBAL PASSES
-          </span>
-          <div className="flex gap-3">
-            <Button
-              onClick={() => void handleRunChapterPass(1)}
-              disabled={isRunningPass || !isLmStudioOnline}
-              className="h-8 text-[9px] tracking-[0.1em] bg-[#d0a080] hover:bg-[#bd8c6c] text-white font-sans uppercase rounded-sm px-5 flex items-center gap-2"
-            >
-              <span className="text-[10px]">
-                {progress.total > 0
-                  ? "✔"
-                  : "〇"}
-              </span>{" "}
-              SEGMENT
-            </Button>
-            <Button
-              onClick={() => void handleRunChapterPass(2)}
-              disabled={
-                isRunningPass || progress.total === 0 || !isLmStudioOnline
-              }
-              className="h-8 text-[9px] tracking-[0.1em] bg-[#d0a080] hover:bg-[#bd8c6c] text-white font-sans uppercase rounded-sm px-5 flex items-center gap-2"
-            >
-              <span className="text-[10px]">
-                {progress.pass2Done === progress.total && progress.total > 0
-                  ? "✔"
-                  : "〇"}
-              </span>{" "}
-              ANALYZE
-            </Button>
-            <Button
-              onClick={() => void handleRunChapterPass(3)}
-              disabled={
-                isRunningPass || progress.total === 0 || !isLmStudioOnline
-              }
-              className="h-8 text-[9px] tracking-[0.1em] bg-[#8b2626] hover:bg-[#701c1c] text-white font-sans uppercase rounded-sm px-5 flex items-center gap-2"
-            >
-              <span className="text-[10px] text-[#f2eadc]">
-                {progress.pass3Done === progress.total && progress.total > 0
-                  ? "✔"
-                  : "〇"}
-              </span>{" "}
-              TRANSLATE
-            </Button>
-          </div>
+        <div className="flex items-center gap-4">
+          {isRunningPass && (
+            <div className="flex items-center gap-2 text-[10px] font-sans text-[#8B2626] font-bold animate-pulse">
+              <div className="w-2 h-2 bg-[#8B2626] rounded-full" />
+              AI PROCESSING...
+            </div>
+          )}
+          <Button
+            variant="ghost"
+            onClick={() => void handleTestConnection()}
+            className="h-7 text-[9px] tracking-widest text-[#a0908b] hover:text-[#4A3D39] font-sans uppercase"
+          >
+            RETEST CONNECTION
+          </Button>
         </div>
       </div>
 

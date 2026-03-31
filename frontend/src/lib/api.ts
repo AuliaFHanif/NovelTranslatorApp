@@ -1,5 +1,25 @@
 export type SourceLanguage = "ja" | "zh";
 
+export interface PolishEdit {
+  original: string;
+  replacement: string;
+  reason: string;
+  applied?: boolean;
+}
+
+export interface Polish {
+  id: number;
+  actId: number;
+  modelUsed: string | null;
+  content: string;
+  editCount: number;
+  appliedCount: number;
+  isActive: boolean;
+  Edits?: PolishEdit[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Series {
   id: number;
   title: string;
@@ -25,7 +45,8 @@ export type TranslationPassState =
   | "idle"
   | "pass1_done"
   | "pass2_done"
-  | "pass3_done";
+  | "pass3_done"
+  | "pass4_done";
 
 export interface Act {
   id: number;
@@ -39,8 +60,15 @@ export interface Act {
     finalTranslation?: string;
     linguistic?: any;
     narrative?: any;
+    pass4Edits?: PolishEdit[];
+    pass4Polished?: string;
   };
+  pass4Edits?: PolishEdit[];
+  pass4Polished?: string;
+  PolishEdits?: PolishEdit[];
+  Polishes?: Polish[];
   translatedText: string | null;
+
   status: string;
   lastRunAt: string | null;
   llmMeta: Record<string, unknown> | null;
@@ -58,6 +86,7 @@ export interface TranslationProgress {
   pass1Done: number;
   pass2Done: number;
   pass3Done: number;
+  pass4Done: number;
 }
 
 export interface GlossaryTerm {
@@ -70,7 +99,7 @@ export interface GlossaryTerm {
   type: string;
   definition?: string;
   metadata: Record<string, any>;
-  status: 'pending' | 'approved' | 'rejected';
+  status: "pending" | "approved" | "rejected";
   confidence?: number;
   createdAt: string;
   updatedAt: string;
@@ -119,7 +148,6 @@ export interface AnalysisResult {
   terms?: GlossaryCandidate[];
 }
 
-
 export interface TranslationBootstrapResponse {
   chapter: TranslationChapter;
   acts: Act[];
@@ -128,13 +156,14 @@ export interface TranslationBootstrapResponse {
 
 export interface TranslationPassResult {
   act: Act;
-  pass: 1 | 2 | 3;
+  pass: 1 | 2 | 3 | 4;
   output: string;
 }
 
 export interface ChapterPassResult {
-  pass: 1 | 2 | 3;
+  pass: 1 | 2 | 3 | 4;
   completed: number;
+
   failed: number;
   failures: Array<{
     actId: number;
@@ -390,7 +419,7 @@ export async function getActTranslationPrompt(
 
 export async function runActPass(
   actId: number,
-  pass: 1 | 2 | 3,
+  pass: 1 | 2 | 3 | 4,
   options?: {
     force?: boolean;
     model?: string;
@@ -412,7 +441,7 @@ export async function runActPass(
 
 export async function runChapterPass(
   chapterId: number,
-  pass: 1 | 2 | 3,
+  pass: 1 | 2 | 3 | 4,
   options?: {
     force?: boolean;
     model?: string;
@@ -470,24 +499,50 @@ export async function updateAct(
 
 export async function runChapterAnalysis(
   chapterId: number,
-  options?: { model?: string; temperature?: number }
+  options?: {
+    model?: string;
+    temperature?: number;
+    task?: "all" | "terms" | "narrative";
+  },
 ): Promise<AnalysisResult> {
   const result = await requestJson<ApiItemResponse<AnalysisResult>>(
     `/chapters/${chapterId}/analyze`,
     {
       method: "POST",
       body: JSON.stringify(options || {}),
-    }
+    },
   );
   return result.data;
 }
 
-export async function getSeriesGlossaryDetailed(seriesId: number): Promise<GlossaryTerm[]> {
-  const result = await requestJson<any>(`/series/${seriesId}/glossary/detailed`);
-  
+export async function runActAnalysis(
+  actId: number,
+  options?: {
+    model?: string;
+    temperature?: number;
+    task?: "all" | "terms" | "narrative";
+  },
+): Promise<AnalysisResult> {
+  const result = await requestJson<ApiItemResponse<AnalysisResult>>(
+    `/acts/${actId}/analyze`,
+    {
+      method: "POST",
+      body: JSON.stringify(options || {}),
+    },
+  );
+  return result.data;
+}
+
+export async function getSeriesGlossaryDetailed(
+  seriesId: number,
+): Promise<GlossaryTerm[]> {
+  const result = await requestJson<any>(
+    `/series/${seriesId}/glossary/detailed`,
+  );
+
   if (Array.isArray(result)) return result;
-  
-  // The backend might return { success: true, data: { entries: [...] } } 
+
+  // The backend might return { success: true, data: { entries: [...] } }
   // OR might return a direct list response.
   const data = result.data || result;
   return data.entries || (Array.isArray(data) ? data : []);
@@ -498,48 +553,46 @@ export async function updateGlossaryTerm(
   payload: {
     termEn?: string;
     type?: string;
-    status?: 'pending' | 'approved' | 'rejected';
+    status?: "pending" | "approved" | "rejected";
     definition?: string;
-  }
+  },
 ): Promise<GlossaryTerm> {
   const result = await requestJson<ApiItemResponse<GlossaryTerm>>(
     `/glossary-terms/${termId}`,
     {
       method: "PUT",
       body: JSON.stringify(payload),
-    }
+    },
   );
   return result.data;
 }
 
 export async function bulkApproveTerms(
   seriesId: number,
-  terms: Array<Partial<GlossaryCandidate> & { termEn: string }>
-): Promise<{ created: number, updated: number, appearances: number }> {
-  const result = await requestJson<ApiItemResponse<{ created: number, updated: number, appearances: number }>>(
-    `/series/${seriesId}/glossary/bulk-approve`,
-    {
-      method: "POST",
-      body: JSON.stringify({ terms }),
-    }
-  );
+  terms: Array<Partial<GlossaryCandidate> & { termEn: string }>,
+): Promise<{ created: number; updated: number; appearances: number }> {
+  const result = await requestJson<
+    ApiItemResponse<{ created: number; updated: number; appearances: number }>
+  >(`/series/${seriesId}/glossary/bulk-approve`, {
+    method: "POST",
+    body: JSON.stringify({ terms }),
+  });
   return result.data;
 }
 
 export async function deleteAllActs(
   chapterId: number,
 ): Promise<{ deletedCount: number }> {
-  const result = await requestJson<
-    ApiItemResponse<{ deletedCount: number }>
-  >(`/translation/chapters/${chapterId}/acts`, {
-    method: "DELETE",
-  });
+  const result = await requestJson<ApiItemResponse<{ deletedCount: number }>>(
+    `/translation/chapters/${chapterId}/acts`,
+    {
+      method: "DELETE",
+    },
+  );
   return result.data ?? result;
 }
 
-export async function exportChapterResult(
-  chapterId: number,
-): Promise<Chapter> {
+export async function exportChapterResult(chapterId: number): Promise<Chapter> {
   const result = await requestJson<ApiItemResponse<Chapter>>(
     `/translation/chapters/${chapterId}/export`,
     {
@@ -549,9 +602,7 @@ export async function exportChapterResult(
   return result.data;
 }
 
-export async function deleteChapterResult(
-  chapterId: number,
-): Promise<void> {
+export async function deleteChapterResult(chapterId: number): Promise<void> {
   await requestJson<ApiItemResponse<void>>(
     `/translation/chapters/${chapterId}/export`,
     {

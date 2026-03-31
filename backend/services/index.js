@@ -5,7 +5,7 @@ module.exports = {
   actCreation: require('./actCreation'),
 
   // Phase 3 services
-  combinedAnalysis: require('./combinedAnalysis'),
+  analysisService: require('./analysisService'),
   glossaryProcessing: require('./glossaryProcessing'),
   strategyGenerator: require('./strategyGenerator')
 };

@@ -1,5 +1,15 @@
-const { combinedAnalysis, glossaryProcessing, strategyGenerator } = require('../services');
-const { Chapter, Act, GlossaryTerm, TermAppearance, Series } = require('../models');
+const {
+  analysisService,
+  glossaryProcessing,
+  strategyGenerator,
+} = require("../services");
+const {
+  Chapter,
+  Act,
+  GlossaryTerm,
+  TermAppearance,
+  Series,
+} = require("../models");
 
 class LexicographerController {
   /**
@@ -8,7 +18,7 @@ class LexicographerController {
    */
   async analyzeChapter(req, res) {
     const { chapterId } = req.params;
-    const { model } = req.body || {};
+    const { model, task = "all" } = req.body || {};
 
     try {
       // 1. Load chapter with acts and series
@@ -16,25 +26,25 @@ class LexicographerController {
         include: [
           {
             model: Act,
-            as: 'Acts',
-            required: false
+            as: "Acts",
+            required: false,
           },
-          'Series'
-        ]
+          "Series",
+        ],
       });
 
       if (!chapter) {
-        return res.status(404).json({ error: 'Chapter not found' });
+        return res.status(404).json({ error: "Chapter not found" });
       }
 
       if (!chapter.Acts || chapter.Acts.length === 0) {
         return res.status(400).json({
-          error: 'No acts found to analyze. Run Phase 1 (Segmentation) first.'
+          error: "No acts found to analyze. Run Phase 1 (Segmentation) first.",
         });
       }
 
       // Update chapter status
-      await chapter.update({ status: 'processing' });
+      await chapter.update({ status: "processing" });
 
       // 2. Process each act in sequence order
       const results = {
@@ -43,151 +53,377 @@ class LexicographerController {
         glossary: {
           created: 0,
           merged: 0,
-          appearances: 0
+          appearances: 0,
         },
-        terms: [] // Track unique terms for the frontend to approve
+        terms: [], // Track unique terms for the frontend to approve
       };
 
-        const allCandidates = [];
+      const allCandidates = [];
 
-        // Sort by sequence to ensure order
-        const sortedActs = chapter.Acts.sort((a, b) => a.sequence - b.sequence);
+      // Sort by sequence to ensure order
+      const sortedActs = chapter.Acts.sort((a, b) => a.sequence - b.sequence);
 
-        for (const act of sortedActs) {
-          try {
-            console.log(`[Phase 3] Analyzing act ${act.label} (${act.id})`);
+      for (const act of sortedActs) {
+        try {
+          console.log(`[Phase 3] Analyzing act ${act.label} (${act.id})`);
 
-            // Ensure act has access to parent Chapter/Series for analysis context
-            act.Chapter = chapter;
+          // Ensure act has access to parent Chapter/Series for analysis context
+          act.Chapter = chapter;
 
-            // CLEAR STALE LINKS: Remove existing appearances for this act before fresh analysis
-            await TermAppearance.destroy({
-              where: { actId: act.id }
-            });
-
-            // Run AI analysis with explicit model
-            const analysis = await combinedAnalysis.analyzeAct(act, { model });
-
-            // Identify terms (approved vs candidates)
-            const { candidates, approvedCount } = await glossaryProcessing.identifyTerms(
-              analysis.extractedTerms || [],
-              act
-            );
-
-            results.glossary.appearances += (analysis.extractedTerms?.length || 0);
-            results.glossary.merged += approvedCount;
-
-            // Collect candidates
-            allCandidates.push(...candidates);
-
-          // Update act with analysis and strategy
-          await act.update({
-            anatomyProfile: {
-              linguistic: analysis.linguisticAnalysis,
-              narrative: analysis.narrativeAnalysis
-            },
-            status: 'ready'
+          // CLEAR STALE LINKS: Remove existing appearances for this act before fresh analysis
+          await TermAppearance.destroy({
+            where: { actId: act.id },
           });
+
+          // Run Phase 3 analysis in two specialized passes
+          if (task === "all" || task === "terms") {
+            try {
+              console.log(
+                `[Phase 3] Pass 1: Extracting terms for act ${act.label}`,
+              );
+              const termResult = await analysisService.extractTerms(act, {
+                model,
+              });
+
+              // Identify terms (approved vs candidates)
+              const { candidates, approvedCount } =
+                await glossaryProcessing.identifyTerms(
+                  termResult.extractedTerms || [],
+                  act,
+                );
+
+              results.glossary.appearances +=
+                termResult.extractedTerms?.length || 0;
+              results.glossary.merged += approvedCount;
+              allCandidates.push(...candidates);
+
+              await act.update({
+                anatomyProfile: {
+                  ...act.anatomyProfile,
+                  termExtractionStatus: "success",
+                },
+              });
+            } catch (err) {
+              await act.update({
+                anatomyProfile: {
+                  ...act.anatomyProfile,
+                  termExtractionStatus: "error",
+                },
+              });
+              throw err;
+            }
+          }
+
+          if (task === "all" || task === "narrative") {
+            try {
+              console.log(
+                `[Phase 3] Pass 2: Analyzing narrative for act ${act.label}`,
+              );
+              const narrativeResult = await analysisService.analyzeNarrative(
+                act,
+                { model },
+              );
+
+              // Update act with analysis results
+              await act.update({
+                anatomyProfile: {
+                  ...act.anatomyProfile, // Preserve existing data (like terms)
+                  linguistic: narrativeResult.linguisticAnalysis,
+                  narrative: narrativeResult.narrativeAnalysis,
+                  actAnalysisStatus: "success",
+                },
+              });
+            } catch (err) {
+              await act.update({
+                anatomyProfile: {
+                  ...act.anatomyProfile,
+                  actAnalysisStatus: "error",
+                },
+              });
+              throw err;
+            }
+          }
+
+          // Mark act as ready if at least one run was fully successful
+          await act.update({ status: "ready" });
 
           // Note: We don't store strategy in Act table in new schema
           // It's derived from anatomyProfile when needed
 
           results.processed++;
-
         } catch (err) {
           console.error(`[Phase 3] Failed act ${act.id}:`, err.message);
           results.failed.push({
             actId: act.id,
             label: act.label,
-            error: err.message
+            error: err.message,
           });
         }
       }
 
       // 3. Aggregate chapter strategy
       const analyzedActs = await Act.findAll({
-        where: { chapterId, status: 'ready' }
+        where: { chapterId, status: "ready" },
       });
 
       if (analyzedActs.length > 0) {
-        const chapterStrategy = strategyGenerator.aggregateChapterStrategy(analyzedActs);
+        const chapterStrategy =
+          strategyGenerator.aggregateChapterStrategy(analyzedActs);
 
         await chapter.update({
           strategyProfile: chapterStrategy,
-          status: 'ready'
+          status: "ready",
         });
 
         results.chapterStrategy = chapterStrategy;
       }
 
-        // 4. Aggregated candidates (deduplicated by term text and type)
-        const candidateMap = new Map();
-        for (const cand of allCandidates) {
-          // Robust normalization for key: trim, case-insensitive mapping
-          const termKey = String(cand.term || '').trim();
-          const typeKey = String(cand.type || 'term').trim();
-          const key = `${termKey}|${typeKey}`.toLowerCase();
+      // 4. Aggregated candidates (deduplicated by term text and type)
+      const candidateMap = new Map();
+      for (const cand of allCandidates) {
+        // Robust normalization for key: trim, case-insensitive mapping
+        const termKey = String(cand.term || "").trim();
+        const typeKey = String(cand.type || "term").trim();
+        const key = `${termKey}|${typeKey}`.toLowerCase();
 
-          if (!candidateMap.has(key)) {
-            candidateMap.set(key, {
-              ...cand,
-              term: termKey, // Use trimmed version
-              appearances: [
-                {
-                  actId: cand.actId,
-                  actLabel: cand.actLabel,
-                  context: cand.context,
-                  confidence: cand.confidence
-                }
-              ]
-            });
-          } else {
-            const existing = candidateMap.get(key);
-            existing.appearances.push({
-              actId: cand.actId,
-              actLabel: cand.actLabel,
-              context: cand.context,
-              confidence: cand.confidence
-            });
-            // Keep highest confidence for the main record
-            if (cand.confidence > (existing.confidence || 0)) {
-              existing.confidence = cand.confidence;
-              existing.proposedTranslation = cand.proposedTranslation;
-            }
+        if (!candidateMap.has(key)) {
+          candidateMap.set(key, {
+            ...cand,
+            term: termKey, // Use trimmed version
+            appearances: [
+              {
+                actId: cand.actId,
+                actLabel: cand.actLabel,
+                context: cand.context,
+                confidence: cand.confidence,
+              },
+            ],
+          });
+        } else {
+          const existing = candidateMap.get(key);
+          existing.appearances.push({
+            actId: cand.actId,
+            actLabel: cand.actLabel,
+            context: cand.context,
+            confidence: cand.confidence,
+          });
+          // Keep highest confidence for the main record
+          if (cand.confidence > (existing.confidence || 0)) {
+            existing.confidence = cand.confidence;
+            existing.proposedTranslation = cand.proposedTranslation;
           }
         }
+      }
 
-        results.terms = Array.from(candidateMap.values());
+      results.terms = Array.from(candidateMap.values());
 
-        // 4. Count pending glossary for response
-        const pendingGlossary = await GlossaryTerm.count({
-          where: {
-            seriesId: chapter.seriesId,
-            status: 'pending'
-          }
-        });
+      // 4. Count pending glossary for response
+      const pendingGlossary = await GlossaryTerm.count({
+        where: {
+          seriesId: chapter.seriesId,
+          status: "pending",
+        },
+      });
 
-        res.json({
-          success: true,
-          data: {
-            chapterId: parseInt(chapterId),
-            ...results,
-            pendingGlossary
-          }
-        });
-
+      res.json({
+        success: true,
+        data: {
+          chapterId: parseInt(chapterId),
+          ...results,
+          pendingGlossary,
+        },
+      });
     } catch (err) {
-      console.error('[Phase 3] Controller error:', err);
+      console.error("[Phase 3] Controller error:", err);
 
       // Rollback status on error
-      await Chapter.update(
-        { status: 'pending' },
-        { where: { id: chapterId } }
-      );
+      await Chapter.update({ status: "pending" }, { where: { id: chapterId } });
 
       res.status(500).json({
         error: err.message,
-        stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+        stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+      });
+    }
+  }
+
+  /**
+   * Run Phase 2 analysis on a single act
+   * POST /api/acts/:actId/analyze
+   */
+  async analyzeAct(req, res) {
+    const { actId } = req.params;
+    const { model, task = "all" } = req.body || {};
+
+    try {
+      // 1. Load act with chapter and series
+      const act = await Act.findByPk(actId, {
+        include: [
+          {
+            model: Chapter,
+            as: "Chapter",
+            include: ["Series"],
+          },
+        ],
+      });
+
+      if (!act) {
+        return res.status(404).json({ error: "Act not found" });
+      }
+
+      if (!act.Chapter || !act.Chapter.Series) {
+        return res
+          .status(400)
+          .json({ error: "Act chapter or series not found" });
+      }
+
+      console.log(`[Phase 2] Analyzing single act ${act.label} (${act.id})`);
+
+      const results = {
+        processed: 0,
+        failed: [],
+        glossary: {
+          created: 0,
+          merged: 0,
+          appearances: 0,
+        },
+        terms: [],
+      };
+
+      try {
+        // CLEAR STALE LINKS: Remove existing appearances for this act before fresh analysis
+        await TermAppearance.destroy({
+          where: { actId: act.id },
+        });
+
+        // Run analysis passes as requested
+        if (task === "all" || task === "terms") {
+          console.log(
+            `[Phase 2] Pass 1: Extracting terms for act ${act.label}`,
+          );
+          try {
+            const termResult = await analysisService.extractTerms(act, {
+              model,
+            });
+
+            // Identify terms (approved vs candidates)
+            const { candidates, approvedCount } =
+              await glossaryProcessing.identifyTerms(
+                termResult.extractedTerms || [],
+                act,
+              );
+
+            results.glossary.appearances +=
+              termResult.extractedTerms?.length || 0;
+            results.glossary.merged += approvedCount;
+
+            // Deduplicate and format candidates for response
+            const candidateMap = new Map();
+            for (const cand of candidates) {
+              const termKey = String(cand.term || "").trim();
+              const typeKey = String(cand.type || "term").trim();
+              const key = `${termKey}|${typeKey}`.toLowerCase();
+
+              if (!candidateMap.has(key)) {
+                candidateMap.set(key, {
+                  ...cand,
+                  term: termKey,
+                  appearances: [
+                    {
+                      actId: cand.actId,
+                      actLabel: cand.actLabel,
+                      context: cand.context,
+                      confidence: cand.confidence,
+                    },
+                  ],
+                });
+              } else {
+                const existing = candidateMap.get(key);
+                existing.appearances.push({
+                  actId: cand.actId,
+                  actLabel: cand.actLabel,
+                  context: cand.context,
+                  confidence: cand.confidence,
+                });
+                if (cand.confidence > (existing.confidence || 0)) {
+                  existing.confidence = cand.confidence;
+                  existing.proposedTranslation = cand.proposedTranslation;
+                }
+              }
+            }
+            results.terms = Array.from(candidateMap.values());
+
+            await act.update({
+              anatomyProfile: {
+                ...act.anatomyProfile,
+                termExtractionStatus: "success",
+              },
+            });
+          } catch (err) {
+            await act.update({
+              anatomyProfile: {
+                ...act.anatomyProfile,
+                termExtractionStatus: "error",
+              },
+            });
+            throw err;
+          }
+        }
+
+        if (task === "all" || task === "narrative") {
+          console.log(
+            `[Phase 2] Pass 2: Analyzing narrative for act ${act.label}`,
+          );
+          try {
+            const narrativeResult = await analysisService.analyzeNarrative(
+              act,
+              {
+                model,
+              },
+            );
+
+            // Update act with analysis results
+            await act.update({
+              anatomyProfile: {
+                ...act.anatomyProfile,
+                linguistic: narrativeResult.linguisticAnalysis,
+                narrative: narrativeResult.narrativeAnalysis,
+                actAnalysisStatus: "success",
+              },
+            });
+          } catch (err) {
+            await act.update({
+              anatomyProfile: {
+                ...act.anatomyProfile,
+                actAnalysisStatus: "error",
+              },
+            });
+            throw err;
+          }
+        }
+
+        await act.update({ status: "ready" });
+        results.processed = 1;
+      } catch (err) {
+        console.error(`[Phase 2] Failed act ${act.id}:`, err.message);
+        results.failed.push({
+          actId: act.id,
+          label: act.label,
+          error: err.message,
+        });
+      }
+
+      res.json({
+        success: true,
+        data: {
+          actId: parseInt(actId),
+          ...results,
+        },
+      });
+    } catch (err) {
+      console.error("[Phase 2] Controller error:", err);
+      res.status(500).json({
+        error: err.message,
+        stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
       });
     }
   }
@@ -207,7 +443,7 @@ class LexicographerController {
 
       const entries = await GlossaryTerm.findAll({
         where,
-        order: [['createdAt', 'DESC']]
+        order: [["createdAt", "DESC"]],
       });
 
       res.json({
@@ -215,10 +451,9 @@ class LexicographerController {
         data: {
           seriesId: parseInt(seriesId),
           count: entries.length,
-          entries
-        }
+          entries,
+        },
       });
-
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -238,21 +473,27 @@ class LexicographerController {
 
       const entries = await GlossaryTerm.findAll({
         where,
-        include: [{
-          model: TermAppearance,
-          as: 'Appearances',
-          include: [{
-            model: Act,
-            as: 'Act',
-            attributes: ['id', 'label', 'sequence'],
-            include: [{
-              model: Chapter,
-              as: 'Chapter',
-              attributes: ['number', 'title']
-            }]
-          }]
-        }],
-        order: [['createdAt', 'DESC']]
+        include: [
+          {
+            model: TermAppearance,
+            as: "Appearances",
+            include: [
+              {
+                model: Act,
+                as: "Act",
+                attributes: ["id", "label", "sequence"],
+                include: [
+                  {
+                    model: Chapter,
+                    as: "Chapter",
+                    attributes: ["number", "title"],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        order: [["createdAt", "DESC"]],
       });
 
       res.json({
@@ -260,10 +501,9 @@ class LexicographerController {
         data: {
           seriesId: parseInt(seriesId),
           count: entries.length,
-          entries
-        }
+          entries,
+        },
       });
-
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -275,20 +515,26 @@ class LexicographerController {
 
     try {
       const term = await GlossaryTerm.findByPk(termId);
-      if (!term) return res.status(404).json({ success: false, error: 'Term not found' });
+      if (!term)
+        return res
+          .status(404)
+          .json({ success: false, error: "Term not found" });
 
       // If status is rejected, DELETE the term (don't just flag it)
-      if (status === 'rejected') {
+      if (status === "rejected") {
         await term.destroy();
-        return res.json({ success: true, message: 'Term deleted successfully' });
+        return res.json({
+          success: true,
+          message: "Term deleted successfully",
+        });
       }
 
-      const updated = await term.update({ 
-        termEn, 
-        definition, 
-        status, 
-        type, 
-        approvedAt: status === 'approved' ? new Date() : term.approvedAt 
+      const updated = await term.update({
+        termEn,
+        definition,
+        status,
+        type,
+        approvedAt: status === "approved" ? new Date() : term.approvedAt,
       });
 
       res.json({ success: true, data: updated });
@@ -307,16 +553,18 @@ class LexicographerController {
 
     try {
       const act = await Act.findByPk(actId, {
-        attributes: ['id', 'label', 'sequence', 'anatomyProfile', 'status'],
-        include: [{
-          model: GlossaryTerm,
-          as: 'Terms',
-          through: { attributes: ['contextSentence', 'confidence'] }
-        }]
+        attributes: ["id", "label", "sequence", "anatomyProfile", "status"],
+        include: [
+          {
+            model: GlossaryTerm,
+            as: "Terms",
+            through: { attributes: ["contextSentence", "confidence"] },
+          },
+        ],
       });
 
       if (!act) {
-        return res.status(404).json({ error: 'Act not found' });
+        return res.status(404).json({ error: "Act not found" });
       }
 
       // Generate strategy on-the-fly from anatomyProfile
@@ -324,7 +572,7 @@ class LexicographerController {
       if (act.anatomyProfile) {
         strategy = strategyGenerator.generateActStrategy(
           act.anatomyProfile.narrative,
-          act.anatomyProfile.linguistic
+          act.anatomyProfile.linguistic,
         );
       }
 
@@ -337,10 +585,9 @@ class LexicographerController {
           status: act.status,
           anatomyProfile: act.anatomyProfile,
           strategy,
-          terms: act.Terms
-        }
+          terms: act.Terms,
+        },
       });
-
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -357,18 +604,17 @@ class LexicographerController {
       const count = await GlossaryTerm.count({
         where: {
           seriesId,
-          status: 'pending'
-        }
+          status: "pending",
+        },
       });
 
       res.json({
         success: true,
         data: {
           seriesId: parseInt(seriesId),
-          pendingCount: count
-        }
+          pendingCount: count,
+        },
       });
-
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -385,24 +631,23 @@ class LexicographerController {
     try {
       const series = await Series.findByPk(seriesId);
       if (!series) {
-        return res.status(404).json({ error: 'Series not found' });
+        return res.status(404).json({ error: "Series not found" });
       }
 
       if (!terms || !Array.isArray(terms)) {
-        return res.status(400).json({ error: 'Terms array is required' });
+        return res.status(400).json({ error: "Terms array is required" });
       }
 
       const results = await glossaryProcessing.handleBulkApproval(
         terms,
         seriesId,
-        series.language
+        series.language,
       );
 
       res.json({
         success: true,
-        data: results
+        data: results,
       });
-
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

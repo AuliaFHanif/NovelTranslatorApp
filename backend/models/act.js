@@ -50,7 +50,25 @@ module.exports = (sequelize, DataTypes) => {
           otherKey: 'actId'
         });
       }
+
+      // One-to-many: Act has many PolishEdits
+      if (models.PolishEdit) {
+        Act.hasMany(models.PolishEdit, {
+          foreignKey: 'actId',
+          as: 'PolishEdits',
+          onDelete: 'CASCADE'
+        });
+      }
+
+      if (models.Polish) {
+        Act.hasMany(models.Polish, {
+          foreignKey: 'actId',
+          as: 'Polishes',
+          onDelete: 'CASCADE'
+        });
+      }
     }
+
 
     // Get previous act in sequence (simple!)
     async getPrevious() {
