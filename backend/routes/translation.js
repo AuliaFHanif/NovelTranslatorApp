@@ -1,5 +1,4 @@
 const express = require("express");
-const axios = require("axios");
 const {
   Act,
   Chapter,
@@ -10,27 +9,11 @@ const {
 } = require("../models");
 
 const { Op } = require("sequelize");
-const { resolveModel } = require("../services/resolveModel");
-const { getPolishInstructions } = require("../services/polishPrompt");
-const { polish: polishSchema } = require("../services/analysisSchemas");
+const translationService = require("../services/translationService");
+const llmClient = require("../services/llmClient");
+const { extractJson } = require("../services/utils");
 
 const router = express.Router();
-
-function extractJson(str) {
-  let cleaned = str.trim();
-  if (cleaned.startsWith("```json")) {
-    cleaned = cleaned.substring(7);
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned.substring(3);
-  }
-  if (cleaned.endsWith("```")) {
-    cleaned = cleaned.substring(0, cleaned.length - 3);
-  }
-  return cleaned.trim();
-}
-
-const LM_STUDIO_URL = process.env.LM_STUDIO_URL || "http://localhost:1234";
-const LM_STUDIO_CHAT_ENDPOINT = `${LM_STUDIO_URL}/v1/chat/completions`;
 
 function parsePass(value) {
   const parsed = Number(value);
@@ -40,506 +23,6 @@ function parsePass(value) {
   return parsed;
 }
 
-function canRunPass() {
-  return { ok: true };
-}
-
-function escapeRegExp(string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // $& means the whole matched string
-}
-
-function buildTranslationPrompt({
-  language,
-  rawActText,
-  glossaryText,
-  analysisContext,
-}) {
-  const languageName = language === "ja" ? "Japanese" : "Chinese";
-
-  const userParts = [`Source language: ${languageName}`];
-
-  if (glossaryText) {
-    userParts.push(
-      `Glossary (use these translations for names/terms):\n${glossaryText}`,
-    );
-  }
-
-  if (analysisContext) {
-    userParts.push(`Literary analysis context:\n${analysisContext}`);
-  }
-
-  userParts.push(
-    "Task: Translate the following text into natural, faithful English. Preserve character voice, narrative tone, cultural nuance, and proper names. Return only the translated text.",
-    "Source text:",
-    rawActText,
-  );
-
-  return [
-    {
-      role: "system",
-      content:
-        "You are an expert literary translator specializing in translating web novels. Produce faithful, natural English translations that preserve the author's voice, tone, and style.",
-    },
-    {
-      role: "user",
-      content: userParts.join("\n\n"),
-    },
-  ];
-}
-
-function buildPolishPrompt({
-  language,
-  rawActText,
-  initialTranslation,
-  analysisContext,
-}) {
-  const languageName = language === "ja" ? "Japanese" : "Chinese";
-
-  const userParts = [
-    `Source language: ${languageName}`,
-    `Source text:\n${rawActText}`,
-    `Initial translation (Pass 3):\n${initialTranslation}`,
-  ];
-
-  if (analysisContext) {
-    userParts.push(`Literary analysis context:\n${analysisContext}`);
-  }
-
-  const polishInstructions = getPolishInstructions(language);
-  userParts.push(polishInstructions);
-
-  return [
-    {
-      role: "system",
-      content:
-        "You are an expert literary editor. Refine translations into natural, high-quality literary English while strictly preserving the author's voice and intent.",
-    },
-    {
-      role: "user",
-      content: userParts.join("\n\n"),
-    },
-  ];
-}
-
-function formatGlossary(entries, language) {
-  if (!entries.length) {
-    return "";
-  }
-
-  const termField = language === "ja" ? "termJa" : "termZh";
-  return entries
-    .map((entry) => {
-      const sourceTerm =
-        entry[termField] || entry.canonicalForm || "(no source term)";
-      const englishTerm = entry.termEn || "(no English term)";
-      const typePrefix = entry.type ? `[${entry.type.toUpperCase()}] ` : "";
-      const definition = entry.definition ? ` - ${entry.definition}` : "";
-      return `- ${typePrefix}${sourceTerm} => ${englishTerm}${definition}`;
-    })
-    .join("\n");
-}
-
-async function collectGlossaryForAct(chapter, act) {
-  // 1. Get terms specifically linked to this act via Phase 3 analysis (TermAppearances)
-  const linkedApproved = await act.getGlossaryTerms({
-    where: { status: "approved" },
-    order: [["updatedAt", "DESC"]],
-  });
-
-  // 2. Fallback/Supplemental: Get all other approved terms for the series and scan for them
-  // This catches terms added to glossary AFTER the analysis pass
-  const allApproved = await GlossaryTerm.findAll({
-    where: {
-      seriesId: chapter.seriesId,
-      status: "approved",
-      id: { [Op.notIn]: linkedApproved.map((t) => t.id) },
-    },
-  });
-
-  if (!act.rawText) {
-    return linkedApproved;
-  }
-
-  const termField = chapter.Series?.language === "ja" ? "termJa" : "termZh";
-  const manualScanMatches = allApproved.filter((term) => {
-    // Check all possible forms: field specific, canonical, and variants
-    const forms = [
-      term[termField],
-      term.canonicalForm,
-      ...(term.metadata?.variants || []),
-    ].filter(Boolean);
-
-    return forms.some((form) => act.rawText.includes(form));
-  });
-
-  // Combine both sets
-  return [...linkedApproved, ...manualScanMatches];
-}
-
-async function aggregateChapterFinalText(chapterId) {
-  const acts = await Act.findAll({
-    where: { chapterId },
-    order: [["sequence", "ASC"]],
-    include: [
-      {
-        model: Polish,
-        as: "Polishes",
-        where: { isActive: true },
-        required: false,
-        include: [
-          {
-            model: PolishEdit,
-            as: "Edits",
-            where: { applied: true },
-            required: false,
-          },
-        ],
-      },
-    ],
-  });
-
-  const cleanedTexts = acts
-    .map((act) => {
-      // Determine the base text:
-      // If a Polish run exists, re-apply only the checked (applied=true) edits
-      // on top of the P3 finalTranslation baseline.
-      // Otherwise fall through to translatedText / finalTranslation.
-      const activePolish = act.Polishes?.[0];
-      const appliedEdits = activePolish?.Edits || [];
-
-      let text;
-      if (activePolish && act.anatomyProfile?.finalTranslation) {
-        // Re-derive polished text from P3 base + only checked edits
-        let patchedText = act.anatomyProfile.finalTranslation;
-        for (const edit of appliedEdits) {
-          if (edit.original && edit.replacement) {
-            const escapedOriginal = edit.original.replace(
-              /[.*+?^${}()|[\]\\]/g,
-              "\\$&",
-            );
-            const regex = new RegExp(escapedOriginal, "g");
-            patchedText = patchedText.replace(regex, edit.replacement);
-          }
-        }
-        text = patchedText;
-        console.log(
-          `Act ${act.sequence} export source: polished (${appliedEdits.length} edits applied)`,
-        );
-      } else {
-        text = act.translatedText || act.anatomyProfile?.finalTranslation || "";
-        const source = act.translatedText
-          ? "translatedText"
-          : act.anatomyProfile?.finalTranslation
-            ? "finalTranslation"
-            : "empty";
-        console.log(`Act ${act.sequence} export source: ${source}`);
-      }
-
-      // Strip <think>...</think> or Thinking Process: ... </think> blocks
-      let cleaned = text
-        .replace(/(?:<think>|Thinking Process:)[\s\S]*?<\/think>/g, "")
-        .trim();
-
-      // Handle orphaned </think>
-      if (cleaned.includes("</think>")) {
-        cleaned = cleaned.split("</think>").pop().trim();
-      }
-
-      return cleaned;
-    })
-    .filter(Boolean);
-
-  const finalText = cleanedTexts.join("\n\n");
-
-  const chapter = await Chapter.findByPk(chapterId);
-  if (!chapter) {
-    return null;
-  }
-
-  chapter.finalText = finalText || null;
-
-  // If we have text for all acts, set status to complete
-  if (acts.length > 0 && cleanedTexts.length === acts.length) {
-    chapter.status = "complete";
-  } else if (cleanedTexts.length > 0) {
-    chapter.status = "ready";
-  }
-
-  await chapter.save();
-  return chapter;
-}
-
-async function prepareActTranslationContext(act, model, pass) {
-  const chapter = await Chapter.findByPk(act.chapterId, {
-    include: [
-      { model: Series, as: "Series", attributes: ["id", "language", "title"] },
-    ],
-  });
-
-  if (!chapter) {
-    throw new Error(`Chapter ${act.chapterId} not found`);
-  }
-
-  const glossaryEntries = await collectGlossaryForAct(chapter, act);
-  const glossaryText = formatGlossary(glossaryEntries, chapter.Series.language);
-
-  // EXPLICIT ACT CONTEXT
-  let analysisContext = `Current Position: Chapter ${chapter.number} | Act ${act.sequence} - ${act.label}`;
-
-  const linguistic = act.anatomyProfile?.linguistic;
-  const narrative = act.anatomyProfile?.narrative;
-  if (linguistic || narrative) {
-    const parts = [];
-    if (narrative?.primaryEmotion)
-      parts.push(`Primary emotion: ${narrative.primaryEmotion}`);
-    if (narrative?.emotionalIntensity)
-      parts.push(`Emotional intensity: ${narrative.emotionalIntensity}`);
-    if (narrative?.pacingPattern)
-      parts.push(`Pacing: ${narrative.pacingPattern}`);
-    if (linguistic?.sentenceStructure)
-      parts.push(`Sentence structure: ${linguistic.sentenceStructure}`);
-    // Chinese-specific: Topic Prominence
-    if (linguistic?.topicProminence?.frequency !== undefined) {
-      const freq = linguistic.topicProminence.frequency;
-      if (freq > 0) {
-        parts.push(
-          `Topic prominence (Topic-Comment foregrounding) frequency: ${(freq * 100).toFixed(0)}% — preserve subject-drop and topic-fronting constructions.`,
-        );
-      }
-    }
-    if (linguistic?.honorifics?.density)
-      parts.push(`Honorific density: ${linguistic.honorifics.density}`);
-    if (linguistic?.onomatopoeia?.density)
-      parts.push(`Onomatopoeia density: ${linguistic.onomatopoeia.density}`);
-    if (narrative?.emotionalTone?.enryo)
-      parts.push("Enryo (restraint/reserve) present");
-    if (narrative?.emotionalTone?.amae)
-      parts.push("Amae (dependence/indulgence) present");
-    if (parts.length > 0) analysisContext += "\n\n" + parts.join("\n");
-  }
-
-  const messages =
-    pass !== 4
-      ? buildTranslationPrompt({
-          language: chapter.Series.language,
-          rawActText: act.rawText || "",
-          glossaryText,
-          analysisContext,
-        })
-      : buildPolishPrompt({
-          language: chapter.Series.language,
-          rawActText: act.rawText || "",
-          initialTranslation: act.anatomyProfile?.finalTranslation || "",
-          analysisContext,
-        });
-
-  const resolvedModel = await resolveModel(model);
-  const responseFormat = pass === 4 ? polishSchema : null;
-
-  return { messages, resolvedModel, chapter, responseFormat };
-}
-
-async function runPassOnAct({
-  act,
-  pass,
-  force,
-  model,
-  temperature,
-  top_p,
-  max_tokens,
-}) {
-  const readiness = canRunPass(act, pass, force);
-  if (!readiness.ok) {
-    return { status: 409, body: { error: readiness.reason } };
-  }
-
-  let messages, resolvedModel, chapter, responseFormat;
-  try {
-    const context = await prepareActTranslationContext(act, model, pass);
-    messages = context.messages;
-    resolvedModel = context.resolvedModel;
-    chapter = context.chapter;
-    responseFormat = context.responseFormat;
-  } catch (err) {
-    return { status: 404, body: { error: err.message } };
-  }
-
-  const llmRequest = {
-    model: resolvedModel,
-    messages,
-    temperature: temperature ?? 0.4,
-
-    top_p: top_p ?? 0.9,
-    max_tokens: max_tokens ?? 16384,
-  };
-
-  if (responseFormat) {
-    llmRequest.response_format = responseFormat;
-  }
-
-  let llmResponse;
-  try {
-    llmResponse = await axios.post(LM_STUDIO_CHAT_ENDPOINT, llmRequest, {
-      timeout: 900000,
-    });
-  } catch (error) {
-    if (error.code === "ECONNREFUSED") {
-      return {
-        status: 503,
-        body: {
-          error: "LM Studio service unavailable",
-          message: `Cannot connect to ${LM_STUDIO_URL}. Ensure LM Studio is running.`,
-        },
-      };
-    }
-
-    if (error.code === "ECONNABORTED") {
-      return {
-        status: 504,
-        body: {
-          error: "LM Studio request timeout",
-          message: "The translation request timed out.",
-        },
-      };
-    }
-
-    return {
-      status: error.response?.status || 500,
-      body: {
-        error: "LM Studio error",
-        details: error.response?.data || error.message,
-      },
-    };
-  }
-
-  const content = llmResponse.data?.choices?.[0]?.message?.content;
-  if (!content || typeof content !== "string") {
-    return {
-      status: 502,
-      body: {
-        error: "Invalid LLM response",
-        message: "No message content returned from LM Studio.",
-      },
-    };
-  }
-
-  const profile = act.anatomyProfile || {};
-  if (pass === 4) {
-    try {
-      const parsed = JSON.parse(extractJson(content));
-      const edits = parsed.edits || [];
-
-      let patchedText = act.anatomyProfile?.finalTranslation || "";
-      const appliedEdits = [];
-
-      for (const edit of edits) {
-        if (edit.original && edit.replacement) {
-          // Improve matching by allowing fuzzy whitespace if the exact match fails
-          const escapedOriginal = escapeRegExp(edit.original);
-          let regex = new RegExp(escapedOriginal, "g");
-
-          if (!regex.test(patchedText)) {
-            // First fallback: whitespace normalization
-            const fuzzyOriginal = escapedOriginal.replace(/\s+/g, "\\s+");
-            regex = new RegExp(fuzzyOriginal, "g");
-          } else {
-            // Reset regex for actual replacement
-            regex = new RegExp(escapedOriginal, "g");
-          }
-
-          const matched = regex.test(patchedText);
-          if (matched) {
-            patchedText = patchedText.replace(regex, edit.replacement);
-            appliedEdits.push({ ...edit, applied: true });
-          } else {
-            console.warn(`Pass 4 edit failed to match: "${edit.original}"`);
-            appliedEdits.push({ ...edit, applied: false });
-          }
-        }
-      }
-
-      act.translatedText = patchedText;
-      act.anatomyProfile = {
-        ...profile,
-        pass4Polished: content,
-        pass4Edits: appliedEdits,
-        pass4AppliedCount: appliedEdits.filter((e) => e.applied).length,
-        pass4TotalCount: appliedEdits.length,
-      };
-
-      // 1. Mark existing polishes as inactive
-      await Polish.update({ isActive: false }, { where: { actId: act.id } });
-
-      // 2. Create new Polish record
-      const newPolish = await Polish.create({
-        actId: act.id,
-        modelUsed: resolvedModel,
-        content: patchedText,
-        editCount: appliedEdits.length,
-        appliedCount: appliedEdits.filter((e) => e.applied).length,
-        isActive: true,
-      });
-
-      // 3. Save to PolishEdit table, linked to the new Polish record
-      await PolishEdit.bulkCreate(
-        appliedEdits.map((edit) => ({
-          actId: act.id,
-          polishId: newPolish.id, // Linked to the new container
-          original: edit.original,
-          replacement: edit.replacement,
-          reason: edit.reason,
-          applied: edit.applied,
-          modelUsed: resolvedModel,
-        })),
-      );
-    } catch (e) {
-      console.error("Failed to parse Pass 4 JSON edits/save to DB:", e.message);
-      return {
-        status: 500,
-        body: {
-          error: "Failed to parse LLM Polish response",
-          message: e.message,
-        },
-      };
-    }
-  } else {
-    act.anatomyProfile = { ...profile, finalTranslation: content };
-    // Pass 3 also populates the base translatedText for export/viewing
-    act.translatedText = content;
-  }
-
-  act.status = "ready";
-
-  act.lastRunAt = new Date();
-  act.llmMeta = {
-    ...(act.llmMeta || {}),
-    [`pass${pass}`]: {
-      model: llmRequest.model,
-      temperature: llmRequest.temperature,
-      top_p: llmRequest.top_p,
-      max_tokens: llmRequest.max_tokens,
-      ranAt: new Date().toISOString(),
-    },
-  };
-
-  await act.save();
-
-  await Chapter.update({ status: "ready" }, { where: { id: act.chapterId } });
-
-  // await aggregateChapterFinalText(act.chapterId);
-
-  return {
-    status: 200,
-    body: {
-      success: true,
-      data: {
-        act,
-        pass,
-        output: content,
-      },
-    },
-  };
-}
 
 router.get("/translate/:seriesId/chapter/:chapterId", async (req, res) => {
   try {
@@ -634,7 +117,7 @@ router.post("/acts/:actId/pass", async (req, res) => {
       return res.status(404).json({ error: `Act ${actId} not found` });
     }
 
-    const result = await runPassOnAct({
+    const result = await translationService.runPassOnAct({
       act,
       pass,
       force,
@@ -644,7 +127,10 @@ router.post("/acts/:actId/pass", async (req, res) => {
       max_tokens: req.body.max_tokens,
     });
 
-    res.status(result.status).json(result.body);
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
   } catch (error) {
     console.error(
       "POST /api/translation/acts/:actId/pass - Error:",
@@ -665,7 +151,7 @@ router.post("/chapters/:chapterId/pass", async (req, res) => {
     }
 
     if (!pass) {
-      return res.status(400).json({ error: "Pass must be 1, 2, or 3" });
+      return res.status(400).json({ error: "Pass must be 1, 2, 3, or 4" });
     }
 
     const acts = await Act.findAll({
@@ -683,24 +169,21 @@ router.post("/chapters/:chapterId/pass", async (req, res) => {
     const failures = [];
 
     for (const act of acts) {
-      const result = await runPassOnAct({
-        act,
-        pass,
-        force,
-        model: req.body.model,
-        temperature: req.body.temperature,
-        top_p: req.body.top_p,
-        max_tokens: req.body.max_tokens,
-      });
-
-      if (result.status === 200) {
-        results.push(result.body.data);
-      } else {
+      try {
+        const result = await translationService.runPassOnAct({
+          act,
+          pass,
+          force,
+          model: req.body.model,
+          temperature: req.body.temperature,
+          top_p: req.body.top_p,
+          max_tokens: req.body.max_tokens,
+        });
+        results.push(result);
+      } catch (err) {
         failures.push({
           actId: act.id,
-          status: result.status,
-          error: result.body.error || "Failed to run pass",
-          message: result.body.message,
+          error: err.message,
         });
       }
     }
@@ -719,10 +202,6 @@ router.post("/chapters/:chapterId/pass", async (req, res) => {
       ],
       order: [["sequence", "ASC"]],
     });
-
-    // if (failures.length === 0) {
-    //   await aggregateChapterFinalText(chapterId);
-    // }
 
     res.status(failures.length > 0 ? 207 : 200).json({
       success: failures.length === 0,
@@ -752,7 +231,11 @@ router.get("/acts/:actId/prompt", async (req, res) => {
     if (!act) return res.status(404).json({ error: "Act not found" });
 
     const pass = parsePass(req.query.pass) || 3;
-    const { messages } = await prepareActTranslationContext(act, model, pass);
+    const { messages } = await translationService.prepareActTranslationContext(
+      act,
+      model,
+      pass,
+    );
 
     res.status(200).json({
       success: true,
@@ -773,159 +256,58 @@ router.get("/acts/:actId/stream", async (req, res) => {
   try {
     const actId = Number(req.params.actId);
     const model = req.query.model;
-    const act = await Act.findByPk(actId);
+    const passNum = Number(req.query.pass) || 3;
 
+    const act = await Act.findByPk(actId);
     if (!act) return res.status(404).json({ error: "Act not found" });
 
-    const passNum = Number(req.query.pass) || 3;
     const { messages, resolvedModel, responseFormat } =
-      await prepareActTranslationContext(act, model, passNum);
+      await translationService.prepareActTranslationContext(act, model, passNum);
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
 
-    const llmRequest = {
+    const payload = {
       model: resolvedModel,
       messages,
       temperature: 0.4,
       max_tokens: 16384,
-      stream: true,
     };
 
-    if (responseFormat) {
-      llmRequest.response_format = responseFormat;
-    }
+    if (responseFormat) payload.response_format = responseFormat;
 
-    const response = await axios.post(LM_STUDIO_CHAT_ENDPOINT, llmRequest, {
-      responseType: "stream",
-    });
-
+    const stream = await llmClient.streamChatCompletion(payload);
     let fullText = "";
 
-    response.data.on("data", (chunk) => {
-      const raw = chunk.toString();
-      const lines = raw.split("\n");
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith("data: ")) continue;
-
-        const dataStr = trimmed.slice(6);
-        if (dataStr === "[DONE]") break;
-
-        try {
-          const data = JSON.parse(dataStr);
-          const content = data.choices[0]?.delta?.content || "";
-          if (content) {
-            fullText += content;
-            res.write(`data: ${JSON.stringify({ content })}\n\n`);
-          }
-        } catch (e) {
-          // Ignore parse errors for incomplete chunks
-        }
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content || "";
+      if (content) {
+        fullText += content;
+        res.write(`data: ${JSON.stringify({ content })}\n\n`);
       }
-    });
+    }
 
-    response.data.on("end", async () => {
-      try {
-        const profile = act.anatomyProfile || {};
-        const passId = Number(req.query.pass) || 3;
+    if (passNum === 4) {
+      await translationService.processPolishResults(
+        act,
+        fullText,
+        resolvedModel,
+      );
+    } else {
+      act.anatomyProfile = {
+        ...(act.anatomyProfile || {}),
+        finalTranslation: fullText,
+      };
+      act.translatedText = fullText;
+    }
 
-        if (passId === 4) {
-          try {
-            const parsed = JSON.parse(extractJson(fullText));
-            const edits = parsed.edits || [];
+    act.status = "ready";
+    act.lastRunAt = new Date();
+    await act.save();
 
-            let patchedText = act.anatomyProfile?.finalTranslation || "";
-            const appliedEdits = [];
-
-            for (const edit of edits) {
-              if (edit.original && edit.replacement) {
-                const escapedOriginal = escapeRegExp(edit.original);
-                let regex = new RegExp(escapedOriginal, "g");
-
-                if (!regex.test(patchedText)) {
-                  const fuzzyOriginal = escapedOriginal.replace(/\s+/g, "\\s+");
-                  regex = new RegExp(fuzzyOriginal, "g");
-                } else {
-                  regex = new RegExp(escapedOriginal, "g");
-                }
-
-                const matched = regex.test(patchedText);
-                if (matched) {
-                  patchedText = patchedText.replace(regex, edit.replacement);
-                  appliedEdits.push({ ...edit, applied: true });
-                } else {
-                  appliedEdits.push({ ...edit, applied: false });
-                }
-              }
-            }
-
-            act.translatedText = patchedText;
-            act.anatomyProfile = {
-              ...profile,
-              pass4Polished: fullText,
-              pass4Edits: appliedEdits,
-              pass4AppliedCount: appliedEdits.filter((e) => e.applied).length,
-              pass4TotalCount: appliedEdits.length,
-            };
-
-            // 1. Mark existing polishes as inactive
-            await Polish.update(
-              { isActive: false },
-              { where: { actId: act.id } },
-            );
-
-            // 2. Create new Polish record
-            const newPolish = await Polish.create({
-              actId: act.id,
-              modelUsed: resolvedModel,
-              content: patchedText,
-              editCount: appliedEdits.length,
-              appliedCount: appliedEdits.filter((e) => e.applied).length,
-              isActive: true,
-            });
-
-            // 3. Save to PolishEdit table, linked to the new Polish record
-            await PolishEdit.bulkCreate(
-              appliedEdits.map((edit) => ({
-                actId: act.id,
-                polishId: newPolish.id, // Linked to the new container
-                original: edit.original,
-                replacement: edit.replacement,
-                reason: edit.reason,
-                applied: edit.applied,
-                modelUsed: resolvedModel,
-              })),
-            );
-          } catch (e) {
-            console.error(
-              "Failed to parse streamed Pass 4 JSON/save to DB:",
-              e.message,
-            );
-            throw new Error(
-              "Failed to parse LLM Polish response: " + e.message,
-            );
-          }
-        } else {
-          act.anatomyProfile = { ...profile, finalTranslation: fullText };
-          act.translatedText = fullText;
-        }
-
-        act.status = "ready";
-        await act.save();
-      } catch (err) {
-        console.error("Failed to save streamed translation:", err);
-      }
-      res.write("data: [DONE]\n\n");
-      res.end();
-    });
-
-    response.data.on("error", (err) => {
-      console.error("Stream error:", err);
-      res.end();
-    });
+    res.write("data: [DONE]\n\n");
+    res.end();
   } catch (error) {
     console.error("Streaming route error:", error);
     if (!res.headersSent) {
@@ -978,10 +360,6 @@ router.patch("/acts/:actId", async (req, res) => {
 
     act.lastRunAt = new Date();
     await act.save();
-
-    // if (translation !== undefined) {
-    //   await aggregateChapterFinalText(act.chapterId);
-    // }
 
     res.status(200).json({
       success: true,
@@ -1074,7 +452,9 @@ router.post("/chapters/:chapterId/export", async (req, res) => {
       return res.status(400).json({ error: "Invalid chapterId" });
     }
 
-    const chapter = await aggregateChapterFinalText(chapterId);
+    const chapter = await translationService.aggregateChapterFinalText(
+      chapterId,
+    );
     if (!chapter) {
       return res.status(404).json({ error: "Chapter not found" });
     }

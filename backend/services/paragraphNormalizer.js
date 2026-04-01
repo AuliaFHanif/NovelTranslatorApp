@@ -1,6 +1,4 @@
-function estimateTokens(text) {
-  return Math.ceil((text || "").length / 4);
-}
+const { estimateTokens } = require('./utils');
 
 function normalizeLineBreaksAndHtml(rawText) {
   return (rawText || "")
@@ -176,7 +174,6 @@ function normalizeParagraphs(rawText) {
 }
 
 module.exports = {
-  estimateTokens,
   normalizeLineBreaksAndHtml,
   normalizeParagraphs,
 };

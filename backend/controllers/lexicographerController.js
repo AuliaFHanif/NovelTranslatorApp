@@ -82,29 +82,9 @@ class LexicographerController {
                 `[Phase 3] Pass 1: Extracting terms for act ${act.label} (3-pass sequence)`,
               );
 
-              // 3-Pass Term Extraction
-              console.log(`  - Pass 1/3: Characters`);
-              const characterResult = await analysisService.extractCharacters(
-                act,
-                { model },
-              );
-
-              console.log(`  - Pass 2/3: Locations & Organizations`);
-              const locationOrgResult =
-                await analysisService.extractLocationsAndOrgs(act, { model });
-
-              console.log(`  - Pass 3/3: Items, Concepts, Techniques`);
-              const itemConceptsResult =
-                await analysisService.extractItemsConceptsTechniques(act, {
-                  model,
-                });
-
-              // Combine results
-              const combinedExtractedTerms = [
-                ...(characterResult.extractedTerms || []),
-                ...(locationOrgResult.extractedTerms || []),
-                ...(itemConceptsResult.extractedTerms || []),
-              ];
+              // 3-Pass Term Extraction via Service
+              const combinedExtractedTerms =
+                await analysisService.runFullTermExtraction(act, { model });
 
               // Identify terms (approved vs candidates)
               const { candidates, approvedCount } =
@@ -321,28 +301,9 @@ class LexicographerController {
             `[Phase 2] Pass 1: Extracting terms for act ${act.label} (3-pass sequence)`,
           );
           try {
-            console.log(`  - Pass 1/3: Characters`);
-            const characterResult = await analysisService.extractCharacters(
-              act,
-              { model },
-            );
-
-            console.log(`  - Pass 2/3: Locations & Organizations`);
-            const locationOrgResult =
-              await analysisService.extractLocationsAndOrgs(act, { model });
-
-            console.log(`  - Pass 3/3: Items, Concepts, Techniques`);
-            const itemConceptsResult =
-              await analysisService.extractItemsConceptsTechniques(act, {
-                model,
-              });
-
-            // Combine results
-            const combinedExtractedTerms = [
-              ...(characterResult.extractedTerms || []),
-              ...(locationOrgResult.extractedTerms || []),
-              ...(itemConceptsResult.extractedTerms || []),
-            ];
+            // 3-Pass Term Extraction via Service
+            const combinedExtractedTerms =
+              await analysisService.runFullTermExtraction(act, { model });
 
             // Identify terms (approved vs candidates)
             const { candidates, approvedCount } =

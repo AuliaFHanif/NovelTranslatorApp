@@ -1,16 +1,6 @@
-const OpenAI = require("openai");
-const { estimateTokens } = require("./paragraphNormalizer");
+const { extractJson, estimateTokens } = require("./utils");
 const { resolveModel } = require("./resolveModel");
-
-function normalizeBaseUrl(url) {
-  const base = (url || "http://localhost:1234").replace(/\/+$/, "");
-  return base.endsWith("/v1") ? base : `${base}/v1`;
-}
-
-const client = new OpenAI({
-  baseURL: normalizeBaseUrl(process.env.LM_STUDIO_URL),
-  apiKey: process.env.LM_STUDIO_API_KEY || "lm-studio",
-});
+const llmClient = require("./llmClient");
 
 const segmentationSchema = {
   type: "json_schema",
@@ -74,18 +64,6 @@ function buildSegmentationPrompt(paragraphs) {
   };
 }
 
-function extractJson(str) {
-  let cleaned = str.trim();
-  if (cleaned.startsWith("```json")) {
-    cleaned = cleaned.substring(7);
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned.substring(3);
-  }
-  if (cleaned.endsWith("```")) {
-    cleaned = cleaned.substring(0, cleaned.length - 3);
-  }
-  return cleaned.trim();
-}
 
 function parseResponseContent(content) {
   if (!content) {
@@ -244,7 +222,7 @@ async function callSegmentationAI(paragraphs, retries = 3, options = {}) {
 
   for (let attempt = 0; attempt < retries; attempt += 1) {
     try {
-      const response = await client.chat.completions.create({
+      const content = await llmClient.chatCompletion({
         model: modelId,
         messages,
         response_format: segmentationSchema,
@@ -252,7 +230,6 @@ async function callSegmentationAI(paragraphs, retries = 3, options = {}) {
         max_tokens: 1000,
       });
 
-      const content = response?.choices?.[0]?.message?.content;
       const result = parseResponseContent(content);
 
       if (!result.sceneBoundaries || !Array.isArray(result.sceneBoundaries)) {

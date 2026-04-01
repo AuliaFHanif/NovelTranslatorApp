@@ -1,28 +1,10 @@
-const OpenAI = require("openai");
 const schemas = require("./analysisSchemas");
 const { resolveModel } = require("./resolveModel");
-
-function extractJson(str) {
-  let cleaned = str.trim();
-  if (cleaned.startsWith("```json")) {
-    cleaned = cleaned.substring(7);
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned.substring(3);
-  }
-  if (cleaned.endsWith("```")) {
-    cleaned = cleaned.substring(0, cleaned.length - 3);
-  }
-  return cleaned.trim();
-}
+const { extractJson } = require("./utils");
+const llmClient = require("./llmClient");
 
 class AnalysisService {
-  constructor() {
-    this.client = new OpenAI({
-      baseURL: process.env.LM_STUDIO_URL || "http://localhost:1234/v1",
-      apiKey: "lm-studio",
-      timeout: 900000, // 15 minutes for heavy analysis
-    });
-  }
+  constructor() {}
 
   // --- TERM EXTRACTION PASSES ---
 
@@ -46,7 +28,7 @@ class AnalysisService {
     ];
 
     try {
-      const response = await this.client.chat.completions.create({
+      const content = await llmClient.chatCompletion({
         model: modelId,
         messages,
         response_format: schema,
@@ -54,9 +36,7 @@ class AnalysisService {
         max_tokens: 1500,
       });
 
-      const result = JSON.parse(
-        extractJson(response.choices[0].message.content),
-      );
+      const result = JSON.parse(extractJson(content));
       return this.sanitizeResult(result);
     } catch (err) {
       console.error(
@@ -110,6 +90,24 @@ class AnalysisService {
   }
 
   /**
+   * Pass 1: Full 3-pass Term Extraction
+   */
+  async runFullTermExtraction(act, options = {}) {
+    const characterResult = await this.extractCharacters(act, options);
+    const locationOrgResult = await this.extractLocationsAndOrgs(act, options);
+    const itemConceptsResult = await this.extractItemsConceptsTechniques(
+      act,
+      options,
+    );
+
+    return [
+      ...(characterResult.extractedTerms || []),
+      ...(locationOrgResult.extractedTerms || []),
+      ...(itemConceptsResult.extractedTerms || []),
+    ];
+  }
+
+  /**
    * Pass 2: Narrative & Linguistic Analysis
    * Focuses on tone, pacing, and grammatical structures.
    */
@@ -134,7 +132,7 @@ class AnalysisService {
     ];
 
     try {
-      const response = await this.client.chat.completions.create({
+      const content = await llmClient.chatCompletion({
         model: modelId,
         messages,
         response_format: schema,
@@ -142,9 +140,7 @@ class AnalysisService {
         max_tokens: 2000,
       });
 
-      const result = JSON.parse(
-        extractJson(response.choices[0].message.content),
-      );
+      const result = JSON.parse(extractJson(content));
 
       // DEBUG: Log raw response to check if topicProminence is present
       if (language === "zh") {

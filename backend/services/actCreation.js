@@ -1,4 +1,5 @@
 const { Act, ActDependency } = require('../models');
+const { estimateTokens } = require('./utils');
 
 class ActCreationService {
   constructor() {
@@ -109,9 +110,6 @@ class ActCreationService {
     return splits;
   }
 
-  estimateTokens(text) {
-    return Math.ceil(text.length / 4);
-  }
 }
 
 module.exports = new ActCreationService();
