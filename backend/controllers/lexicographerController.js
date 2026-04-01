@@ -75,25 +75,45 @@ class LexicographerController {
             where: { actId: act.id },
           });
 
-          // Run Phase 3 analysis in two specialized passes
+          // Run Phase 3 analysis in specialized passes
           if (task === "all" || task === "terms") {
             try {
               console.log(
-                `[Phase 3] Pass 1: Extracting terms for act ${act.label}`,
+                `[Phase 3] Pass 1: Extracting terms for act ${act.label} (3-pass sequence)`,
               );
-              const termResult = await analysisService.extractTerms(act, {
-                model,
-              });
+
+              // 3-Pass Term Extraction
+              console.log(`  - Pass 1/3: Characters`);
+              const characterResult = await analysisService.extractCharacters(
+                act,
+                { model },
+              );
+
+              console.log(`  - Pass 2/3: Locations & Organizations`);
+              const locationOrgResult =
+                await analysisService.extractLocationsAndOrgs(act, { model });
+
+              console.log(`  - Pass 3/3: Items, Concepts, Techniques`);
+              const itemConceptsResult =
+                await analysisService.extractItemsConceptsTechniques(act, {
+                  model,
+                });
+
+              // Combine results
+              const combinedExtractedTerms = [
+                ...(characterResult.extractedTerms || []),
+                ...(locationOrgResult.extractedTerms || []),
+                ...(itemConceptsResult.extractedTerms || []),
+              ];
 
               // Identify terms (approved vs candidates)
               const { candidates, approvedCount } =
                 await glossaryProcessing.identifyTerms(
-                  termResult.extractedTerms || [],
+                  combinedExtractedTerms,
                   act,
                 );
 
-              results.glossary.appearances +=
-                termResult.extractedTerms?.length || 0;
+              results.glossary.appearances += combinedExtractedTerms.length;
               results.glossary.merged += approvedCount;
               allCandidates.push(...candidates);
 
@@ -298,22 +318,40 @@ class LexicographerController {
         // Run analysis passes as requested
         if (task === "all" || task === "terms") {
           console.log(
-            `[Phase 2] Pass 1: Extracting terms for act ${act.label}`,
+            `[Phase 2] Pass 1: Extracting terms for act ${act.label} (3-pass sequence)`,
           );
           try {
-            const termResult = await analysisService.extractTerms(act, {
-              model,
-            });
+            console.log(`  - Pass 1/3: Characters`);
+            const characterResult = await analysisService.extractCharacters(
+              act,
+              { model },
+            );
+
+            console.log(`  - Pass 2/3: Locations & Organizations`);
+            const locationOrgResult =
+              await analysisService.extractLocationsAndOrgs(act, { model });
+
+            console.log(`  - Pass 3/3: Items, Concepts, Techniques`);
+            const itemConceptsResult =
+              await analysisService.extractItemsConceptsTechniques(act, {
+                model,
+              });
+
+            // Combine results
+            const combinedExtractedTerms = [
+              ...(characterResult.extractedTerms || []),
+              ...(locationOrgResult.extractedTerms || []),
+              ...(itemConceptsResult.extractedTerms || []),
+            ];
 
             // Identify terms (approved vs candidates)
             const { candidates, approvedCount } =
               await glossaryProcessing.identifyTerms(
-                termResult.extractedTerms || [],
+                combinedExtractedTerms,
                 act,
               );
 
-            results.glossary.appearances +=
-              termResult.extractedTerms?.length || 0;
+            results.glossary.appearances += combinedExtractedTerms.length;
             results.glossary.merged += approvedCount;
 
             // Deduplicate and format candidates for response

@@ -22,12 +22,13 @@ import {
   updateAct,
   deleteAllActs,
   exportChapterResult,
+  togglePolishEdit,
   type Act,
   type AIModel,
   type TranslationChapter,
   type GlossaryCandidate,
 } from "../lib/api";
-import { showError, showInfo, showSuccess } from "../lib/notifications";
+import { showError, showInfo, showSuccess, showConfirm } from "../lib/notifications";
 import { Badge } from "../components/ui/badge";
 import { GlossaryApprovalDialog } from "../components/GlossaryApprovalDialog";
 import { PromptViewerDialog } from "../components/PromptViewerDialog";
@@ -56,6 +57,8 @@ export function Translation() {
     content: string;
   }> | null>(null);
   const [isFetchingPrompt, setIsFetchingPrompt] = useState(false);
+  // Map from PolishEdit id -> applied (checkbox state)
+  const [polishEditChecked, setPolishEditChecked] = useState<Record<number, boolean>>({});
 
   const seriesId = Number(searchParams.get("seriesId") || "0");
   const chapterId = Number(searchParams.get("chapterId") || "0");
@@ -119,6 +122,15 @@ export function Translation() {
         selectedAct?.anatomyProfile?.draftTranslation ||
         "",
     );
+    // Sync checkbox state from DB applied field
+    const edits = selectedAct?.Polishes?.[0]?.Edits ?? [];
+    const initial: Record<number, boolean> = {};
+    for (const edit of edits) {
+      if (edit.id !== undefined) {
+        initial[edit.id] = edit.applied !== false;
+      }
+    }
+    setPolishEditChecked(initial);
   }, [selectedAct]);
 
   async function loadTranslationChapter() {
@@ -340,7 +352,8 @@ export function Translation() {
       // Pass 1: Architect (segment chapter into acts)
       if (pass === 1) {
         if (progress.total > 0) {
-          const confirmed = window.confirm(
+          const confirmed = await showConfirm(
+            "Re-segment Chapter?",
             `Acts already exist for this chapter. Are you sure you want to delete all ${progress.total} acts and re-segment? Current translations and analysis WILL BE LOST.`,
           );
           if (!confirmed) return;
@@ -555,7 +568,8 @@ export function Translation() {
       await showInfo("No Acts", "There are no acts to delete.");
       return;
     }
-    const confirmed = window.confirm(
+    const confirmed = await showConfirm(
+      "Delete All Acts?",
       `Are you sure you want to delete all ${acts.length} act(s) for this chapter? This cannot be undone.`,
     );
     if (!confirmed) return;
@@ -671,7 +685,7 @@ export function Translation() {
             </Button>
             <Button
               variant="outline"
-              onClick={() => void handleRunChapterPass(2, "all")}
+              onClick={() => void handleRunChapterPass(2, "narrative")}
               disabled={
                 isRunningPass || !isLmStudioOnline || progress.total === 0
               }
@@ -932,6 +946,18 @@ export function Translation() {
                   <Badge variant="secondary" className="h-4 text-[8px]">
                     PASS 4
                   </Badge>
+                  {(() => {
+                    const edits = selectedAct?.Polishes?.[0]?.Edits ?? [];
+                    if (edits.length === 0) return null;
+                    const checkedCount = edits.filter(
+                      (e) => e.id !== undefined && polishEditChecked[e.id] !== false,
+                    ).length;
+                    return (
+                      <span className="text-[8px] font-sans text-[#807068] bg-[#f2eadc] px-1.5 py-0.5 rounded-sm">
+                        {checkedCount}/{edits.length} selected
+                      </span>
+                    );
+                  })()}
                 </div>
                 <Button
                   variant="ghost"
@@ -947,34 +973,97 @@ export function Translation() {
                 {selectedAct?.Polishes?.[0]?.Edits?.length ? (
                   <div className="grid grid-cols-1 gap-3">
                     {selectedAct.Polishes[0].Edits.map(
-                      (edit: any, idx: number) => (
-                        <div
-                          key={idx}
-                          className={`p-3 border rounded-sm bg-white text-[11px] font-serif shadow-sm ${edit.applied === false ? "opacity-60 border-dashed border-[#d8cdbd]" : "border-[#e8dfcf]"}`}
-                        >
-                          <div className="flex justify-between items-start gap-4">
-                            <div className="flex-1">
-                              <div className="line-through text-[#8b2626]/60 italic mb-1">
-                                "{edit.original}"
-                              </div>
-                              <div className="font-bold text-[#2f7a46] mb-2">
-                                "{edit.replacement}"
-                              </div>
-                              <div className="text-[9px] font-sans text-[#a0908b] bg-[#f2eadc]/20 p-1 px-2 rounded-sm inline-block">
-                                {edit.reason}
-                              </div>
-                            </div>
-                            {edit.applied !== false && (
-                              <Badge
-                                variant="outline"
-                                className="text-[8px] border-[#2f7a46] text-[#2f7a46] bg-[#ebf5ed]"
+                      (edit: any, idx: number) => {
+                        const editId: number | undefined = edit.id;
+                        const isChecked =
+                          editId !== undefined
+                            ? polishEditChecked[editId] !== false
+                            : edit.applied !== false;
+
+                        const handleToggle = async () => {
+                          if (editId === undefined) return;
+                          const newVal = !isChecked;
+                          // Optimistic update
+                          setPolishEditChecked((prev) => ({
+                            ...prev,
+                            [editId]: newVal,
+                          }));
+                          try {
+                            await togglePolishEdit(editId, newVal);
+                          } catch {
+                            // Revert on error
+                            setPolishEditChecked((prev) => ({
+                              ...prev,
+                              [editId]: isChecked,
+                            }));
+                          }
+                        };
+
+                        return (
+                          <div
+                            key={idx}
+                            className={`p-3 border rounded-sm bg-white text-[11px] font-serif shadow-sm transition-opacity ${
+                              isChecked
+                                ? "border-[#e8dfcf] opacity-100"
+                                : "opacity-50 border-dashed border-[#d8cdbd]"
+                            }`}
+                          >
+                            <div className="flex items-start gap-3">
+                              {/* Checkbox */}
+                              <button
+                                type="button"
+                                onClick={() => void handleToggle()}
+                                disabled={editId === undefined}
+                                title={isChecked ? "Uncheck to skip this edit on export" : "Check to apply this edit on export"}
+                                className={`mt-0.5 shrink-0 w-3.5 h-3.5 rounded-sm border flex items-center justify-center transition-colors cursor-pointer ${
+                                  isChecked
+                                    ? "bg-[#2f7a46] border-[#2f7a46]"
+                                    : "bg-white border-[#d8cdbd] hover:border-[#a0908b]"
+                                } ${editId === undefined ? "opacity-40 cursor-not-allowed" : ""}`}
                               >
-                                APPLIED
-                              </Badge>
-                            )}
+                                {isChecked && (
+                                  <svg
+                                    viewBox="0 0 10 8"
+                                    fill="none"
+                                    className="w-2 h-2"
+                                  >
+                                    <path
+                                      d="M1 4l2.5 2.5L9 1"
+                                      stroke="white"
+                                      strokeWidth="1.5"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                    />
+                                  </svg>
+                                )}
+                              </button>
+
+                              {/* Edit content */}
+                              <div className="flex-1 min-w-0">
+                                <div className="line-through text-[#8b2626]/60 italic mb-1 break-words">
+                                  &ldquo;{edit.original}&rdquo;
+                                </div>
+                                <div className="font-bold text-[#2f7a46] mb-2 break-words">
+                                  &ldquo;{edit.replacement}&rdquo;
+                                </div>
+                                <div className="text-[9px] font-sans text-[#a0908b] bg-[#f2eadc]/20 p-1 px-2 rounded-sm inline-block">
+                                  {edit.reason}
+                                </div>
+                              </div>
+
+                              {/* Applied badge */}
+                              {isChecked && (
+                                <Badge
+                                  variant="outline"
+                                  className="text-[8px] border-[#2f7a46] text-[#2f7a46] bg-[#ebf5ed] shrink-0"
+                                >
+                                  EXPORT
+                                </Badge>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      ),
+                        );
+                      },
                     )}
                   </div>
                 ) : (

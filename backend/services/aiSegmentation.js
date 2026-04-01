@@ -70,8 +70,21 @@ function buildSegmentationPrompt(paragraphs) {
 
   return {
     role: "user",
-    content: `Analyze this chapter and identify scene boundaries.\n\nA scene is a continuous narrative unit with consistent:\n- Time (no time jumps)\n- Location (same setting)\n- POV (same perspective/character focus)\n\nImportant constraints:\n- You are selecting boundaries only.\n- Do NOT summarize, rewrite, or skip connective narrative detail.\n- Keep world-building and internal monologue inside scenes unless there is a true scene transition.\n- Ensure boundaries represent full contiguous coverage from P1 to the final paragraph.\n\nParagraphs:\n${formatted}\n\nIdentify paragraph indices where one scene ends and another begins.\nReturn boundaries as 1-based indices (e.g., [3, 7, 12] means scenes end at P3, P7, P12).`,
+    content: `Analyze this chapter and identify scene boundaries.\n\nA scene is a continuous narrative unit with consistent:\n- Time (no time jumps)\n- Location (same setting)\n\nImportant constraints:\n- Do NOT create a new scene for minor POV shifts, internal monologues, or brief changes in character focus. If the characters are in the same time and location, keep them in the same scene.\n- You are selecting boundaries only.\n- Do NOT summarize, rewrite, or skip connective narrative detail.\n- Keep world-building and internal monologue inside scenes unless there is a true scene transition.\n- Ensure boundaries represent full contiguous coverage from P1 to the final paragraph.\n\nParagraphs:\n${formatted}\n\nIdentify paragraph indices where one scene ends and another begins.\nReturn boundaries as 1-based indices (e.g., [3, 7, 12] means scenes end at P3, P7, P12).`,
   };
+}
+
+function extractJson(str) {
+  let cleaned = str.trim();
+  if (cleaned.startsWith("```json")) {
+    cleaned = cleaned.substring(7);
+  } else if (cleaned.startsWith("```")) {
+    cleaned = cleaned.substring(3);
+  }
+  if (cleaned.endsWith("```")) {
+    cleaned = cleaned.substring(0, cleaned.length - 3);
+  }
+  return cleaned.trim();
 }
 
 function parseResponseContent(content) {
@@ -80,7 +93,7 @@ function parseResponseContent(content) {
   }
 
   if (typeof content === "string") {
-    return JSON.parse(content);
+    return JSON.parse(extractJson(content));
   }
 
   if (typeof content === "object") {
@@ -112,8 +125,7 @@ function smoothBoundaries(boundaries, paragraphs) {
     .filter((v) => Number.isInteger(v) && v >= 1 && v <= maxParagraph)
     .sort((a, b) => a - b);
 
-  const MIN_TOKENS_PER_ACT =
-    Number(process.env.MIN_ACT_TOKENS) || 400;
+  const MIN_TOKENS_PER_ACT = Number(process.env.MIN_ACT_TOKENS) || 400;
   const adjusted = [];
 
   for (const rawBoundary of normalized) {
@@ -166,8 +178,8 @@ function smoothBoundaries(boundaries, paragraphs) {
   for (const boundary of dedupedAdjusted) {
     let spanTokens = 0;
     for (let i = lastBoundary; i < boundary; i++) {
-        const text = paragraphs[i]?.text || "";
-        spanTokens += estimateTokens(text);
+      const text = paragraphs[i]?.text || "";
+      spanTokens += estimateTokens(text);
     }
     accumulatedTokens += spanTokens;
 
@@ -179,9 +191,14 @@ function smoothBoundaries(boundaries, paragraphs) {
         lastActText += (paragraphs[i]?.text || "") + " ";
       }
 
-      const cjkMatch = lastActText.match(/[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]/g);
+      const cjkMatch = lastActText.match(
+        /[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]/g,
+      );
       const cjkCount = cjkMatch ? cjkMatch.length : 0;
-      const nonCjkText = lastActText.replace(/[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]/g, " ");
+      const nonCjkText = lastActText.replace(
+        /[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]/g,
+        " ",
+      );
       const wordMatch = nonCjkText.match(/\b\w+\b/g);
       const wordCount = wordMatch ? wordMatch.length : 0;
       const totalWords = cjkCount + wordCount;

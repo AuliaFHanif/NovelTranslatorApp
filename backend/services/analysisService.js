@@ -2,6 +2,19 @@ const OpenAI = require("openai");
 const schemas = require("./analysisSchemas");
 const { resolveModel } = require("./resolveModel");
 
+function extractJson(str) {
+  let cleaned = str.trim();
+  if (cleaned.startsWith("```json")) {
+    cleaned = cleaned.substring(7);
+  } else if (cleaned.startsWith("```")) {
+    cleaned = cleaned.substring(3);
+  }
+  if (cleaned.endsWith("```")) {
+    cleaned = cleaned.substring(0, cleaned.length - 3);
+  }
+  return cleaned.trim();
+}
+
 class AnalysisService {
   constructor() {
     this.client = new OpenAI({
@@ -11,23 +24,20 @@ class AnalysisService {
     });
   }
 
-  /**
-   * Pass 1: Term Extraction
-   * Focuses purely on identifying names, locations, and unique world terms.
-   */
-  async extractTerms(act, options = {}) {
+  // --- TERM EXTRACTION PASSES ---
+
+  async _executeExtractionPass(act, options, schema, systemPromptBuilder) {
     const language = act.Chapter?.Series?.language;
     if (!language || !["ja", "zh"].includes(language)) {
       throw new Error(`Unsupported language: ${language}`);
     }
 
     const modelId = await resolveModel(options.model);
-    const schema = schemas.terms;
 
     const messages = [
       {
         role: "system",
-        content: this.buildTermExtractionSystemPrompt(language),
+        content: systemPromptBuilder(language),
       },
       {
         role: "user",
@@ -44,18 +54,59 @@ class AnalysisService {
         max_tokens: 1500,
       });
 
-      const result = JSON.parse(response.choices[0].message.content);
-      const sanitized = this.sanitizeResult(result);
-
-      return {
-        ...sanitized,
-        actId: act.id,
-        extractedAt: new Date().toISOString(),
-      };
+      const result = JSON.parse(
+        extractJson(response.choices[0].message.content),
+      );
+      return this.sanitizeResult(result);
     } catch (err) {
-      console.error(`Term extraction failed for act ${act.id}:`, err.message);
+      console.error(
+        `Term extraction pass failed for act ${act.id}:`,
+        err.message,
+      );
       throw err;
     }
+  }
+
+  async extractCharacters(act, options = {}) {
+    const result = await this._executeExtractionPass(
+      act,
+      options,
+      schemas.terms.character,
+      this.buildCharacterExtractionPrompt,
+    );
+    return {
+      ...result,
+      actId: act.id,
+      extractedAt: new Date().toISOString(),
+    };
+  }
+
+  async extractLocationsAndOrgs(act, options = {}) {
+    const result = await this._executeExtractionPass(
+      act,
+      options,
+      schemas.terms.locationOrg,
+      this.buildLocationOrgExtractionPrompt,
+    );
+    return {
+      ...result,
+      actId: act.id,
+      extractedAt: new Date().toISOString(),
+    };
+  }
+
+  async extractItemsConceptsTechniques(act, options = {}) {
+    const result = await this._executeExtractionPass(
+      act,
+      options,
+      schemas.terms.itemConceptTechnique,
+      this.buildItemConceptTechniqueExtractionPrompt,
+    );
+    return {
+      ...result,
+      actId: act.id,
+      extractedAt: new Date().toISOString(),
+    };
   }
 
   /**
@@ -91,7 +142,9 @@ class AnalysisService {
         max_tokens: 2000,
       });
 
-      const result = JSON.parse(response.choices[0].message.content);
+      const result = JSON.parse(
+        extractJson(response.choices[0].message.content),
+      );
 
       // DEBUG: Log raw response to check if topicProminence is present
       if (language === "zh") {
@@ -119,27 +172,54 @@ class AnalysisService {
 
   // --- PROMPT BUILDERS ---
 
-  buildTermExtractionSystemPrompt(language) {
+  buildCharacterExtractionPrompt = (language) => {
     return `You are a precision lexicographer for ${language === "ja" ? "Japanese" : "Chinese"} web novels.
-Your sole task is to extract important terms for a series glossary.
+Your sole task is to extract CHARACTER NAMES for a series glossary.
 
 STRICT EXTRACTION RULES:
-1. PRIORITIZE:
-   - Proper Names (Characters, Sects, unique locations).
-   - Unique World Terms (Magic items, specific techniques, currency).
-2. EXCLUDE:
-   - General dictionary terms (e.g., "running", "sword", "village", "angry").
-   - Common environment descriptions.
+1. ONLY EXTRACT CHARACTERS:
+   - Include main characters, side characters, notable figures.
+   - Include pets or titled entities functioning as characters.
+2. EXCLUDE everything else (no locations, items, or general words).
 3. FORMATTING:
    - "term": The EXACT source text (JA/ZH characters).
-   - "proposedTranslation": A clear literary English name (e.g., "Bai Feng", "Heavenly Sword").
-   - "context": A brief English snippet of how it's used.
-   - All descriptions MUST be in ENGLISH.
+   - "proposedTranslation": A clear, romanized phonetic name (e.g., "Pinyin" for Chinese, "Romaji" for Japanese), properly capitalized.
+   - "context": A brief English snippet of who they are without spoiling future events.
+   - All descriptions MUST be in ENGLISH.`;
+  };
 
-NAMING CONVENTION (CRITICAL):
-- Phonetic (Pinyin/Romaji) for PROPER NAMES.
-- Literary English for UNIQUE CONCEPTS.`;
-  }
+  buildLocationOrgExtractionPrompt = (language) => {
+    return `You are a precision lexicographer for ${language === "ja" ? "Japanese" : "Chinese"} web novels.
+Your sole task is to extract LOCATIONS and ORGANIZATIONS for a series glossary.
+
+STRICT EXTRACTION RULES:
+1. ONLY EXTRACT LOCATIONS AND ORGANIZATIONS:
+   - Locations: Cities, continents, realms, distinct geographical features, specific buildings.
+   - Organizations: Sects, gangs, guilds, families, clans, empires.
+2. EXCLUDE everything else (no characters, items, or concepts).
+3. FORMATTING:
+   - "term": The EXACT source text (JA/ZH characters).
+   - "proposedTranslation": A clear literary English name (e.g., "Heavenly Sword Sect", "Azure Continent"). Combine phonetic and literal translations as appropriate for the genre.
+   - "context": A brief English snippet of what it is.
+   - All descriptions MUST be in ENGLISH.`;
+  };
+
+  buildItemConceptTechniqueExtractionPrompt = (language) => {
+    return `You are a precision lexicographer for ${language === "ja" ? "Japanese" : "Chinese"} web novels.
+Your sole task is to extract ITEMS, CONCEPTS, and TECHNIQUES for a series glossary.
+
+STRICT EXTRACTION RULES:
+1. ONLY EXTRACT ITEMS, CONCEPTS, AND TECHNIQUES:
+   - Items: Weapons, artifacts, pills, currency, distinct materials.
+   - Concepts: Unique world terms, societal rules, realms of cultivation/magic, special states of being.
+   - Techniques: Martial arts moves, magic spells, secret arts.
+2. EXCLUDE everything else (no characters, locations, or orgs).
+3. FORMATTING:
+   - "term": The EXACT source text (JA/ZH characters).
+   - "proposedTranslation": A clear literary English name (e.g., "Nine Heavens Dragon Sword", "Qi Condensation").
+   - "context": A brief English snippet of how it's used or what it means.
+   - All descriptions MUST be in ENGLISH.`;
+  };
 
   buildTermExtractionUserPrompt(act) {
     // Truncate long text

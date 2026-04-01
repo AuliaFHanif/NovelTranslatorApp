@@ -1,6 +1,7 @@
 export type SourceLanguage = "ja" | "zh";
 
 export interface PolishEdit {
+  id?: number;
   original: string;
   replacement: string;
   reason: string;
@@ -62,6 +63,8 @@ export interface Act {
     narrative?: any;
     pass4Edits?: PolishEdit[];
     pass4Polished?: string;
+    termExtractionStatus?: string;
+    actAnalysisStatus?: string;
   };
   pass4Edits?: PolishEdit[];
   pass4Polished?: string;
@@ -609,6 +612,20 @@ export async function deleteChapterResult(chapterId: number): Promise<void> {
       method: "DELETE",
     },
   );
+}
+
+export async function togglePolishEdit(
+  editId: number,
+  applied: boolean,
+): Promise<PolishEdit> {
+  const result = await requestJson<ApiItemResponse<PolishEdit>>(
+    `/translation/polish-edits/${editId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ applied }),
+    },
+  );
+  return result.data;
 }
 
 /**
