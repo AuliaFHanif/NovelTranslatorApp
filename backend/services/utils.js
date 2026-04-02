@@ -8,14 +8,14 @@
  * @returns {string} Cleaned JSON string
  */
 function extractJson(str) {
-  if (typeof str !== 'string') return '';
+  if (typeof str !== "string") return "";
   let cleaned = str.trim();
-  if (cleaned.startsWith('```json')) {
+  if (cleaned.startsWith("```json")) {
     cleaned = cleaned.substring(7);
-  } else if (cleaned.startsWith('```')) {
+  } else if (cleaned.startsWith("```")) {
     cleaned = cleaned.substring(3);
   }
-  if (cleaned.endsWith('```')) {
+  if (cleaned.endsWith("```")) {
     cleaned = cleaned.substring(0, cleaned.length - 3);
   }
   return cleaned.trim();
@@ -31,7 +31,7 @@ function safeParseJson(content) {
   try {
     return JSON.parse(extractJson(content));
   } catch (e) {
-    console.warn('[utils] Failed to parse JSON:', e.message);
+    console.warn("[utils] Failed to parse JSON:", e.message);
     // Potential further fallback: more aggressive cleaning if needed
     return null;
   }
@@ -43,11 +43,28 @@ function safeParseJson(content) {
  * @returns {number} Estimated tokens
  */
 function estimateTokens(text) {
-  return Math.ceil((text || '').length / 4);
+  return Math.ceil((text || "").length / 4);
+}
+
+/**
+ * Counts approximate word count in text.
+ * Splits on whitespace and filters empty elements.
+ * @param {string} text - Input text
+ * @returns {number} Approximate word count
+ */
+function countWords(text) {
+  if (!text) return 0;
+  // Split on whitespace, filter empty strings
+  const words = text
+    .trim()
+    .split(/\s+/)
+    .filter((word) => word.length > 0);
+  return words.length;
 }
 
 module.exports = {
   extractJson,
   safeParseJson,
-  estimateTokens
+  estimateTokens,
+  countWords,
 };

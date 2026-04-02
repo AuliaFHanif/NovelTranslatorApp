@@ -137,6 +137,45 @@ export interface GlossaryCandidate {
   }>;
 }
 
+export interface ConflictedTerm extends GlossaryCandidate {
+  existingTranslation: string;
+  existingStatus: string;
+  termEn?: string;
+}
+
+export interface BulkApprovalResult {
+  created: number;
+  updated: number;
+  appearances: number;
+  categorized: {
+    newTerms: GlossaryCandidate[];
+    existingTerms: Omit<ConflictedTerm, "existingTranslation">[];
+    conflictTerms: ConflictedTerm[];
+  };
+  conflictCount: number;
+}
+
+export interface ConflictResolution {
+  existingId: number;
+  term: string;
+  resolution: "keep_existing" | "merge" | "create_variant";
+  termEn: string;
+  variantForm?: string;
+  appearances: Array<{
+    actId: number;
+    context: string;
+    confidence: number;
+  }>;
+}
+
+export interface ConflictResolutionResult {
+  processed: number;
+  kept: number;
+  merged: number;
+  created_variants: number;
+  failed: string[];
+}
+
 export interface AnalysisResult {
   success: boolean;
   chapterId: number;
@@ -479,21 +518,32 @@ export async function runArchitectPhase(
 
 export async function updateAct(
   actId: number,
-  payload: {
-    rawText?: string;
-    draftTranslation?: string;
-    translation?: string;
-  },
-): Promise<Act> {
-  const result = await requestJson<ApiItemResponse<Act>>(
-    `/translation/acts/${actId}`,
-    {
-      method: "PATCH",
-      body: JSON.stringify(payload),
-    },
-  );
+  rawText: string,
+): Promise<{
+  success: boolean;
+  wasSplit?: boolean;
+  updatedAct?: Act;
+  updatedActs?: Act[];
+  message?: string;
+}> {
+  const result = await requestJson<any>(`/chapters/acts/${actId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ rawText }),
+  });
 
-  return result.data;
+  return result.data || result;
+}
+
+export async function deleteAct(actId: number): Promise<{
+  success: boolean;
+  message?: string;
+  remainingActCount?: number;
+}> {
+  const result = await requestJson<any>(`/chapters/acts/${actId}`, {
+    method: "DELETE",
+  });
+
+  return result.data || result;
 }
 
 /**
@@ -536,6 +586,25 @@ export async function runActAnalysis(
   return result.data;
 }
 
+export async function runActGroupAnalysis(
+  chapterId: number,
+  actIds: number[],
+  options?: {
+    model?: string;
+    temperature?: number;
+    task?: "all" | "terms" | "narrative";
+  },
+): Promise<AnalysisResult> {
+  const result = await requestJson<ApiItemResponse<AnalysisResult>>(
+    `/chapters/${chapterId}/analyze-group`,
+    {
+      method: "POST",
+      body: JSON.stringify({ actIds, ...(options || {}) }),
+    },
+  );
+  return result.data;
+}
+
 export async function getSeriesGlossaryDetailed(
   seriesId: number,
 ): Promise<GlossaryTerm[]> {
@@ -573,13 +642,28 @@ export async function updateGlossaryTerm(
 export async function bulkApproveTerms(
   seriesId: number,
   terms: Array<Partial<GlossaryCandidate> & { termEn: string }>,
-): Promise<{ created: number; updated: number; appearances: number }> {
-  const result = await requestJson<
-    ApiItemResponse<{ created: number; updated: number; appearances: number }>
-  >(`/series/${seriesId}/glossary/bulk-approve`, {
-    method: "POST",
-    body: JSON.stringify({ terms }),
-  });
+): Promise<BulkApprovalResult> {
+  const result = await requestJson<ApiItemResponse<BulkApprovalResult>>(
+    `/series/${seriesId}/glossary/bulk-approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({ terms }),
+    },
+  );
+  return result.data;
+}
+
+export async function resolveTermConflicts(
+  seriesId: number,
+  resolutions: ConflictResolution[],
+): Promise<ConflictResolutionResult> {
+  const result = await requestJson<ApiItemResponse<ConflictResolutionResult>>(
+    `/series/${seriesId}/glossary/resolve-conflicts`,
+    {
+      method: "POST",
+      body: JSON.stringify({ resolutions }),
+    },
+  );
   return result.data;
 }
 

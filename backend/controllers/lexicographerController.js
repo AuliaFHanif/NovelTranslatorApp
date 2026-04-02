@@ -247,8 +247,9 @@ class LexicographerController {
   }
 
   /**
-   * Run Phase 2 analysis on a single act
+   * Run Phase 2 analysis on a single act or its group
    * POST /api/acts/:actId/analyze
+   * Auto-detects if act is part of a group and analyzes all together
    */
   async analyzeAct(req, res) {
     const { actId } = req.params;
@@ -276,8 +277,33 @@ class LexicographerController {
           .json({ error: "Act chapter or series not found" });
       }
 
-      console.log(`[Phase 2] Analyzing single act ${act.label} (${act.id})`);
+      // 2. Detect act group - if act is part of a group (1A, 1B), analyze all together
+      const allChapterActs = await Act.findAll({
+        where: { chapterId: act.chapterId },
+        order: [["sequence", "ASC"]],
+      });
 
+      const groupActIds = analysisService.detectActGroup(actId, allChapterActs);
+      const isGrouped = groupActIds.length > 1;
+
+      console.log(
+        `[Phase 2] Analyzing act ${act.label} (${act.id}) - ${isGrouped ? "Group: " + groupActIds.join(", ") : "Single act"}`,
+      );
+
+      // Load all group acts with full context
+      const groupActs = await Act.findAll({
+        where: { id: groupActIds },
+        include: [
+          {
+            model: Chapter,
+            as: "Chapter",
+            include: ["Series"],
+          },
+        ],
+        order: [["sequence", "ASC"]],
+      });
+
+      // Prepare results
       const results = {
         processed: 0,
         failed: [],
@@ -287,142 +313,237 @@ class LexicographerController {
           appearances: 0,
         },
         terms: [],
+        groupSize: groupActs.length,
+        groupedActsLabels: groupActs.map((a) => a.label),
       };
 
+      // Clear existing appearances for all group members
+      await TermAppearance.destroy({
+        where: { actId: groupActIds },
+      });
+
+      // Run grouped analysis
       try {
-        // CLEAR STALE LINKS: Remove existing appearances for this act before fresh analysis
-        await TermAppearance.destroy({
-          where: { actId: act.id },
-        });
+        const analysisResults = await analysisService.analyzeActGroup(
+          groupActs,
+          { model, task },
+        );
 
-        // Run analysis passes as requested
-        if (task === "all" || task === "terms") {
-          console.log(
-            `[Phase 2] Pass 1: Extracting terms for act ${act.label} (3-pass sequence)`,
-          );
-          try {
-            // 3-Pass Term Extraction via Service
-            const combinedExtractedTerms =
-              await analysisService.runFullTermExtraction(act, { model });
+        results.processed = analysisResults.analyzed.length;
+        results.failed = analysisResults.failed;
 
-            // Identify terms (approved vs candidates)
-            const { candidates, approvedCount } =
-              await glossaryProcessing.identifyTerms(
-                combinedExtractedTerms,
-                act,
-              );
+        // Process extracted terms if any
+        if (
+          analysisResults.termsFound &&
+          analysisResults.termsFound.length > 0
+        ) {
+          // Link terms to the originating acts
+          // For grouped analysis, link to all acts in the group
+          for (const term of analysisResults.termsFound) {
+            // Create appearance for each group act
+            for (const gAct of groupActs) {
+              const { candidates, approvedCount } =
+                await glossaryProcessing.identifyTerms(
+                  [{ ...term, actId: gAct.id, actLabel: gAct.label }],
+                  gAct,
+                );
 
-            results.glossary.appearances += combinedExtractedTerms.length;
-            results.glossary.merged += approvedCount;
+              results.glossary.appearances += 1;
+              results.glossary.merged += approvedCount;
 
-            // Deduplicate and format candidates for response
-            const candidateMap = new Map();
-            for (const cand of candidates) {
-              const termKey = String(cand.term || "").trim();
-              const typeKey = String(cand.type || "term").trim();
-              const key = `${termKey}|${typeKey}`.toLowerCase();
+              if (candidates.length > 0) {
+                const candidateMap = new Map();
+                for (const cand of candidates) {
+                  const termKey = String(cand.term || "").trim();
+                  const typeKey = String(cand.type || "term").trim();
+                  const key = `${termKey}|${typeKey}`.toLowerCase();
 
-              if (!candidateMap.has(key)) {
-                candidateMap.set(key, {
-                  ...cand,
-                  term: termKey,
-                  appearances: [
-                    {
+                  if (!candidateMap.has(key)) {
+                    candidateMap.set(key, {
+                      ...cand,
+                      term: termKey,
+                      appearances: [
+                        {
+                          actId: cand.actId,
+                          actLabel: cand.actLabel,
+                          context: cand.context,
+                          confidence: cand.confidence,
+                        },
+                      ],
+                    });
+                  } else {
+                    const existing = candidateMap.get(key);
+                    existing.appearances.push({
                       actId: cand.actId,
                       actLabel: cand.actLabel,
                       context: cand.context,
                       confidence: cand.confidence,
-                    },
-                  ],
-                });
-              } else {
-                const existing = candidateMap.get(key);
-                existing.appearances.push({
-                  actId: cand.actId,
-                  actLabel: cand.actLabel,
-                  context: cand.context,
-                  confidence: cand.confidence,
-                });
-                if (cand.confidence > (existing.confidence || 0)) {
-                  existing.confidence = cand.confidence;
-                  existing.proposedTranslation = cand.proposedTranslation;
+                    });
+                  }
+                }
+
+                for (const cand of candidateMap.values()) {
+                  results.terms.push(cand);
                 }
               }
             }
-            results.terms = Array.from(candidateMap.values());
-
-            await act.update({
-              anatomyProfile: {
-                ...act.anatomyProfile,
-                termExtractionStatus: "success",
-              },
-            });
-          } catch (err) {
-            await act.update({
-              anatomyProfile: {
-                ...act.anatomyProfile,
-                termExtractionStatus: "error",
-              },
-            });
-            throw err;
           }
         }
 
-        if (task === "all" || task === "narrative") {
-          console.log(
-            `[Phase 2] Pass 2: Analyzing narrative for act ${act.label}`,
-          );
-          try {
-            const narrativeResult = await analysisService.analyzeNarrative(
-              act,
-              {
-                model,
-              },
-            );
-
-            // Update act with analysis results
-            await act.update({
-              anatomyProfile: {
-                ...act.anatomyProfile,
-                linguistic: narrativeResult.linguisticAnalysis,
-                narrative: narrativeResult.narrativeAnalysis,
-                actAnalysisStatus: "success",
-              },
-            });
-          } catch (err) {
-            await act.update({
-              anatomyProfile: {
-                ...act.anatomyProfile,
-                actAnalysisStatus: "error",
-              },
-            });
-            throw err;
-          }
-        }
-
-        await act.update({ status: "ready" });
-        results.processed = 1;
-      } catch (err) {
-        console.error(`[Phase 2] Failed act ${act.id}:`, err.message);
-        results.failed.push({
-          actId: act.id,
-          label: act.label,
-          error: err.message,
+        // Return success with analysis details
+        return res.status(200).json({
+          success: true,
+          message: isGrouped
+            ? `Analyzed ${groupActs.length} acts as a group`
+            : "Analyzed single act",
+          data: results,
+          terms: results.terms,
         });
+      } catch (err) {
+        throw err;
+      }
+    } catch (error) {
+      console.error(`[Phase 2] Analysis failed:`, error.message);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  }
+
+  /**
+   * Explicitly analyze a group of acts together
+   * POST /api/chapters/:chapterId/analyze-group
+   * Body: { actIds: [1, 2, 3], task: "all" | "terms" | "narrative" }
+   */
+  async analyzeActGroup(req, res) {
+    const { chapterId } = req.params;
+    const { actIds = [], model, task = "all" } = req.body || {};
+
+    try {
+      if (!Array.isArray(actIds) || actIds.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "actIds must be a non-empty array" });
       }
 
-      res.json({
-        success: true,
-        data: {
-          actId: parseInt(actId),
-          ...results,
-        },
+      // Load chapter
+      const chapter = await Chapter.findByPk(chapterId, {
+        include: ["Series"],
       });
-    } catch (err) {
-      console.error("[Phase 2] Controller error:", err);
-      res.status(500).json({
-        error: err.message,
-        stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+
+      if (!chapter) {
+        return res.status(404).json({ error: "Chapter not found" });
+      }
+
+      // Load all acts
+      const acts = await Act.findAll({
+        where: { id: actIds, chapterId },
+        include: [
+          {
+            model: Chapter,
+            as: "Chapter",
+            include: ["Series"],
+          },
+        ],
+        order: [["sequence", "ASC"]],
+      });
+
+      if (acts.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "No acts found for the given IDs" });
+      }
+
+      console.log(
+        `[Grouped Analysis] Explicit group analysis for acts: ${acts.map((a) => a.label).join(", ")}`,
+      );
+
+      // Clear existing appearances
+      await TermAppearance.destroy({
+        where: { actId: actIds },
+      });
+
+      // Run analysis
+      const analysisResults = await analysisService.analyzeActGroup(acts, {
+        model,
+        task,
+      });
+
+      // Process terms similar to analyzeAct
+      const results = {
+        processed: analysisResults.analyzed.length,
+        failed: analysisResults.failed,
+        glossary: {
+          appearances: 0,
+          merged: 0,
+          created: 0,
+        },
+        terms: [],
+      };
+
+      if (analysisResults.termsFound && analysisResults.termsFound.length > 0) {
+        for (const term of analysisResults.termsFound) {
+          for (const gAct of acts) {
+            const { candidates, approvedCount } =
+              await glossaryProcessing.identifyTerms(
+                [{ ...term, actId: gAct.id, actLabel: gAct.label }],
+                gAct,
+              );
+
+            results.glossary.appearances += 1;
+            results.glossary.merged += approvedCount;
+
+            if (candidates.length > 0) {
+              const candidateMap = new Map();
+              for (const cand of candidates) {
+                const termKey = String(cand.term || "").trim();
+                const typeKey = String(cand.type || "term").trim();
+                const key = `${termKey}|${typeKey}`.toLowerCase();
+
+                if (!candidateMap.has(key)) {
+                  candidateMap.set(key, {
+                    ...cand,
+                    term: termKey,
+                    appearances: [
+                      {
+                        actId: cand.actId,
+                        actLabel: cand.actLabel,
+                        context: cand.context,
+                        confidence: cand.confidence,
+                      },
+                    ],
+                  });
+                } else {
+                  const existing = candidateMap.get(key);
+                  existing.appearances.push({
+                    actId: cand.actId,
+                    actLabel: cand.actLabel,
+                    context: cand.context,
+                    confidence: cand.confidence,
+                  });
+                }
+              }
+
+              for (const cand of candidateMap.values()) {
+                results.terms.push(cand);
+              }
+            }
+          }
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `Analyzed ${acts.length} acts as a group`,
+        data: results,
+        terms: results.terms,
+      });
+    } catch (error) {
+      console.error(`[Grouped Analysis] Failed:`, error.message);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
       });
     }
   }
@@ -622,6 +743,7 @@ class LexicographerController {
   /**
    * Bulk approve candidates
    * POST /api/series/:seriesId/glossary/bulk-approve
+   * Returns: { newTerms, existingTerms, conflictTerms, results: { created, updated, appearances } }
    */
   async bulkApprove(req, res) {
     const { seriesId } = req.params;
@@ -637,8 +759,58 @@ class LexicographerController {
         return res.status(400).json({ error: "Terms array is required" });
       }
 
-      const results = await glossaryProcessing.handleBulkApproval(
+      // Phase 3: Detect conflicts and categorize terms
+      const categorized = await glossaryProcessing.detectTermConflicts(
         terms,
+        seriesId,
+        series.language,
+      );
+
+      // Process only new and existing terms for now (skip conflicts - user must resolve)
+      const termsToProcess = [
+        ...categorized.newTerms,
+        ...categorized.existingTerms,
+      ];
+      const results = await glossaryProcessing.handleBulkApproval(
+        termsToProcess,
+        seriesId,
+        series.language,
+      );
+
+      res.json({
+        success: true,
+        data: {
+          ...results,
+          categorized, // Return categorization for frontend conflict handling
+          conflictCount: categorized.conflictTerms.length,
+        },
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  /**
+   * Resolve term conflicts
+   * POST /api/series/:seriesId/glossary/resolve-conflicts
+   * Body: { resolutions: [{ existingId, term, resolution, termEn, variantForm?, appearances }] }
+   */
+  async resolveTermConflicts(req, res) {
+    const { seriesId } = req.params;
+    const { resolutions } = req.body;
+
+    try {
+      const series = await Series.findByPk(seriesId);
+      if (!series) {
+        return res.status(404).json({ error: "Series not found" });
+      }
+
+      if (!resolutions || !Array.isArray(resolutions)) {
+        return res.status(400).json({ error: "Resolutions array is required" });
+      }
+
+      const results = await glossaryProcessing.resolveConflicts(
+        resolutions,
         seriesId,
         series.language,
       );

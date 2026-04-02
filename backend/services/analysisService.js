@@ -1,10 +1,158 @@
 const schemas = require("./analysisSchemas");
 const { resolveModel } = require("./resolveModel");
-const { extractJson } = require("./utils");
+const { extractJson, countWords } = require("./utils");
 const llmClient = require("./llmClient");
 
 class AnalysisService {
   constructor() {}
+
+  /**
+   * Detect if an act is part of a group (e.g., 1A, 1B are grouped)
+   * Returns array of act IDs that belong to the same group
+   * @param {number} actId - The act to check
+   * @param {Array} allChapterActs - All acts in the chapter
+   * @returns {Array} Array of act IDs in the same group (or just [actId] if not grouped)
+   */
+  detectActGroup(actId, allChapterActs) {
+    const targetAct = allChapterActs.find((a) => a.id === actId);
+    if (!targetAct) return [actId];
+
+    // Extract base label (e.g., "1" from "1A", "1" from "1B")
+    const label = String(targetAct.label || "");
+    const baseLabel = label.replace(/[A-Z]$/, ""); // Remove suffix if present
+
+    if (!baseLabel || baseLabel === label) {
+      // No grouping detected (no letter suffix), return just this act
+      return [actId];
+    }
+
+    // Find all acts with same base label
+    const groupActs = allChapterActs.filter((a) => {
+      const aLabel = String(a.label || "");
+      const aBaseLabel = aLabel.replace(/[A-Z]$/, "");
+      return aBaseLabel === baseLabel;
+    });
+
+    // Return group members sorted by sequence
+    return groupActs.sort((a, b) => a.sequence - b.sequence).map((a) => a.id);
+  }
+
+  /**
+   * Analyze a group of acts together (concatenate text, run single analysis)
+   * Stores identical analysis in all acts' anatomyProfile
+   * @param {Array} acts - Array of act objects to analyze together
+   * @param {Object} options - { model, task }
+   * @returns {Array} Array of updated act objects
+   */
+  async analyzeActGroup(acts, options = {}) {
+    if (!acts || acts.length === 0) {
+      throw new Error("Must provide at least one act to analyze");
+    }
+
+    // Concatenate all act texts
+    const combinedText = acts.map((a) => a.rawText).join("\n\n");
+    const combinedWords = countWords(combinedText);
+
+    console.log(
+      `[Grouped Analysis] Analyzing ${acts.length} acts (${combinedWords} words total)`,
+    );
+    console.log(
+      `[Grouped Analysis] Acts: ${acts.map((a) => a.label).join(", ")}`,
+    );
+
+    // Create temporary mock act with combined text for analysis
+    const groupAct = {
+      id: acts[0].id,
+      label: acts.map((a) => a.label).join(" + "),
+      rawText: combinedText,
+      Chapter: acts[0].Chapter,
+    };
+
+    const results = {
+      analyzed: [],
+      failed: [],
+      termsFound: [],
+    };
+
+    try {
+      // Run extraction on combined text if task includes "terms"
+      if (options.task === "all" || options.task === "terms") {
+        try {
+          console.log(`[Grouped Analysis] Pass 1: Extracting terms from group`);
+          const combinedExtractedTerms = await this.runFullTermExtraction(
+            groupAct,
+            options,
+          );
+          results.termsFound = combinedExtractedTerms;
+        } catch (err) {
+          console.error(
+            `[Grouped Analysis] Term extraction failed:`,
+            err.message,
+          );
+          results.failed.push({
+            stage: "term_extraction",
+            error: err.message,
+          });
+        }
+      }
+
+      // Run narrative analysis on combined text if task includes "narrative"
+      let narrativeResult = null;
+      if (options.task === "all" || options.task === "narrative") {
+        try {
+          console.log(
+            `[Grouped Analysis] Pass 2: Analyzing narrative for group`,
+          );
+          narrativeResult = await this.analyzeNarrative(groupAct, options);
+        } catch (err) {
+          console.error(
+            `[Grouped Analysis] Narrative analysis failed:`,
+            err.message,
+          );
+          results.failed.push({
+            stage: "narrative_analysis",
+            error: err.message,
+          });
+        }
+      }
+
+      // Store identical analysis in all acts
+      for (const act of acts) {
+        const updatedProfile = {
+          ...act.anatomyProfile,
+        };
+
+        if (options.task === "all" || options.task === "terms") {
+          updatedProfile.termExtractionStatus = results.failed.some(
+            (f) => f.stage === "term_extraction",
+          )
+            ? "error"
+            : "success";
+        }
+
+        if (
+          (options.task === "all" || options.task === "narrative") &&
+          narrativeResult
+        ) {
+          updatedProfile.linguistic = narrativeResult.linguisticAnalysis;
+          updatedProfile.narrative = narrativeResult.narrativeAnalysis;
+          updatedProfile.actAnalysisStatus = "success";
+        }
+
+        await act.update({
+          anatomyProfile: updatedProfile,
+          status: results.failed.length === 0 ? "ready" : "pending",
+        });
+
+        results.analyzed.push(act);
+      }
+
+      return results;
+    } catch (err) {
+      console.error(`[Grouped Analysis] Critical error:`, err.message);
+      throw err;
+    }
+  }
 
   // --- TERM EXTRACTION PASSES ---
 

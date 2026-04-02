@@ -60,10 +60,9 @@ function buildSegmentationPrompt(paragraphs) {
 
   return {
     role: "user",
-    content: `Analyze this chapter and identify scene boundaries.\n\nA scene is a continuous narrative unit with consistent:\n- Time (no time jumps)\n- Location (same setting)\n\nImportant constraints:\n- Do NOT create a new scene for minor POV shifts, internal monologues, or brief changes in character focus. If the characters are in the same time and location, keep them in the same scene.\n- You are selecting boundaries only.\n- Do NOT summarize, rewrite, or skip connective narrative detail.\n- Keep world-building and internal monologue inside scenes unless there is a true scene transition.\n- Ensure boundaries represent full contiguous coverage from P1 to the final paragraph.\n\nParagraphs:\n${formatted}\n\nIdentify paragraph indices where one scene ends and another begins.\nReturn boundaries as 1-based indices (e.g., [3, 7, 12] means scenes end at P3, P7, P12).`,
+    content: `Analyze this chapter and identify major scene boundaries.\n\nA scene is a continuous narrative unit with consistent:\n- Time (no time jumps)\n- Location (same setting)\n\nImportant constraints:\n- Do NOT create a new scene for minor POV shifts, internal monologues, or brief changes in character focus. If the characters are in the same time and location, keep them in the same scene.\n- You are selecting boundaries only.\n- Do NOT summarize, rewrite, or skip connective narrative detail.\n- Keep world-building and internal monologue inside scenes unless there is a true scene transition.\n- Ensure boundaries represent full contiguous coverage from P1 to the final paragraph.\n\nParagraphs:\n${formatted}\n\nIdentify paragraph indices where one scene ends and another begins.\nReturn boundaries as 1-based indices (e.g., [3, 7, 12] means scenes end at P3, P7, P12).`,
   };
 }
-
 
 function parseResponseContent(content) {
   if (!content) {
@@ -71,7 +70,20 @@ function parseResponseContent(content) {
   }
 
   if (typeof content === "string") {
-    return JSON.parse(extractJson(content));
+    try {
+      const cleaned = extractJson(content);
+      if (!cleaned || cleaned.length === 0) {
+        throw new Error("Extracted JSON is empty");
+      }
+      return JSON.parse(cleaned);
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        throw new Error(
+          `Invalid JSON from AI response: ${e.message}. Raw response: ${content.substring(0, 200)}`,
+        );
+      }
+      throw e;
+    }
   }
 
   if (typeof content === "object") {
@@ -226,27 +238,52 @@ async function callSegmentationAI(paragraphs, retries = 3, options = {}) {
         model: modelId,
         messages,
         response_format: segmentationSchema,
-        temperature: 0.2 + attempt * 0.15,
-        max_tokens: 1000,
+        temperature: 0.2,
+        max_tokens: 16000,
       });
+
+      console.log(
+        `[AI Segmentation] Attempt ${attempt + 1} raw response type: ${typeof content}`,
+      );
+      if (typeof content === "string" && content.length > 0) {
+        console.log(
+          `[AI Segmentation] Response preview: ${content.substring(0, 200)}`,
+        );
+      }
 
       const result = parseResponseContent(content);
 
       if (!result.sceneBoundaries || !Array.isArray(result.sceneBoundaries)) {
-        throw new Error("Invalid response: sceneBoundaries missing");
+        throw new Error(
+          "Invalid response: sceneBoundaries missing or not an array",
+        );
+      }
+
+      if (result.sceneBoundaries.length === 0) {
+        throw new Error("Invalid response: sceneBoundaries is empty");
       }
 
       const maxParagraph = paragraphs.length;
+      console.log(
+        `[AI Segmentation] Raw boundaries: [${result.sceneBoundaries.join(", ")}], max paragraphs: ${maxParagraph}`,
+      );
+
       const deduped = [...new Set(result.sceneBoundaries)]
         .map((v) => Number(v))
         .filter((v) => Number.isInteger(v))
         .sort((a, b) => a - b);
 
+      console.log(
+        `[AI Segmentation] Deduped boundaries: [${deduped.join(", ")}]`,
+      );
+
       const invalid = deduped.filter(
         (boundary) => boundary < 1 || boundary > maxParagraph,
       );
       if (invalid.length > 0) {
-        throw new Error(`Boundaries out of range: ${invalid.join(", ")}`);
+        throw new Error(
+          `Boundaries out of range. Valid range is 1-${maxParagraph}, but got: [${invalid.join(", ")}]`,
+        );
       }
 
       const boundaries = deduped.length > 0 ? deduped : [maxParagraph];
@@ -254,7 +291,14 @@ async function callSegmentationAI(paragraphs, retries = 3, options = {}) {
         boundaries.push(maxParagraph);
       }
 
+      console.log(
+        `[AI Segmentation] Final boundaries before smoothing: [${boundaries.join(", ")}]`,
+      );
+
       const smoothedBoundaries = smoothBoundaries(boundaries, paragraphs);
+      console.log(
+        `[AI Segmentation] Smoothed boundaries: [${smoothedBoundaries.join(", ")}]`,
+      );
 
       return {
         boundaries: smoothedBoundaries,

@@ -1,7 +1,11 @@
 const express = require("express");
 const router = express.Router();
 const { Series, Chapter, Act } = require("../models");
-const { runArchitectPhase } = require("../controllers/architectController");
+const {
+  runArchitectPhase,
+  updateAct,
+  deleteAct,
+} = require("../controllers/architectController");
 
 /**
  * GET /api/chapters
@@ -14,7 +18,13 @@ router.get("/", async (req, res) => {
 
     const chapters = await Chapter.findAll({
       where,
-      include: [{ model: Series, as: 'Series', attributes: ["id", "title", "language"] }],
+      include: [
+        {
+          model: Series,
+          as: "Series",
+          attributes: ["id", "title", "language"],
+        },
+      ],
       order: [["number", "ASC"]],
     });
 
@@ -104,8 +114,12 @@ router.get("/:id", async (req, res) => {
 
     const chapter = await Chapter.findByPk(id, {
       include: [
-        { model: Series, as: 'Series', attributes: ["id", "title", "language"] },
-        { model: Act, as: 'Acts' },
+        {
+          model: Series,
+          as: "Series",
+          attributes: ["id", "title", "language"],
+        },
+        { model: Act, as: "Acts" },
       ],
     });
 
@@ -177,5 +191,19 @@ router.delete("/:id", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+/**
+ * PATCH /api/acts/:id
+ * Update an act's raw text
+ * If word count exceeds MAX_WORDS, auto-splits at paragraph boundaries
+ */
+router.patch("/acts/:id", updateAct);
+
+/**
+ * DELETE /api/acts/:id
+ * Delete an act
+ * Keeps GlossaryTerms in library but removes TermAppearances for this act
+ */
+router.delete("/acts/:id", deleteAct);
 
 module.exports = router;

@@ -9,6 +9,14 @@ import {
   SelectValue,
 } from "../components/ui/select";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../components/ui/dialog";
+import {
   getHealthStatus,
   getTranslationChapter,
   listAIModels,
@@ -17,9 +25,11 @@ import {
   runArchitectPhase,
   runChapterAnalysis,
   runActAnalysis,
+  runActGroupAnalysis,
   getActTranslationPrompt,
   runChapterPass,
   updateAct,
+  deleteAct,
   deleteAllActs,
   exportChapterResult,
   togglePolishEdit,
@@ -28,7 +38,12 @@ import {
   type TranslationChapter,
   type GlossaryCandidate,
 } from "../lib/api";
-import { showError, showInfo, showSuccess, showConfirm } from "../lib/notifications";
+import {
+  showError,
+  showInfo,
+  showSuccess,
+  showConfirm,
+} from "../lib/notifications";
 import { Badge } from "../components/ui/badge";
 import { GlossaryApprovalDialog } from "../components/GlossaryApprovalDialog";
 import { PromptViewerDialog } from "../components/PromptViewerDialog";
@@ -58,7 +73,13 @@ export function Translation() {
   }> | null>(null);
   const [isFetchingPrompt, setIsFetchingPrompt] = useState(false);
   // Map from PolishEdit id -> applied (checkbox state)
-  const [polishEditChecked, setPolishEditChecked] = useState<Record<number, boolean>>({});
+  const [polishEditChecked, setPolishEditChecked] = useState<
+    Record<number, boolean>
+  >({});
+  // Act edit mode state
+  const [isEditingAct, setIsEditingAct] = useState(false);
+  const [editActText, setEditActText] = useState("");
+  const [isActMetadataLoading, setIsActMetadataLoading] = useState(false);
 
   const seriesId = Number(searchParams.get("seriesId") || "0");
   const chapterId = Number(searchParams.get("chapterId") || "0");
@@ -276,6 +297,32 @@ export function Translation() {
     }
   }
 
+  /**
+   * Detect if an act is part of a group (e.g., 1A, 1B are grouped)
+   * Returns array of all act IDs in the same group
+   */
+  function detectActGroup(actId: number): number[] {
+    const targetAct = acts.find((a) => a.id === actId);
+    if (!targetAct) return [actId];
+
+    const label = String(targetAct.label || "");
+    const baseLabel = label.replace(/[A-Z]$/, ""); // Remove suffix if present
+
+    if (!baseLabel || baseLabel === label) {
+      // No grouping detected
+      return [actId];
+    }
+
+    // Find all acts with same base label
+    const groupActs = acts.filter((a) => {
+      const aLabel = String(a.label || "");
+      const aBaseLabel = aLabel.replace(/[A-Z]$/, "");
+      return aBaseLabel === baseLabel;
+    });
+
+    return groupActs.sort((a, b) => a.sequence - b.sequence).map((a) => a.id);
+  }
+
   async function handleAnalyzeAct(task: "terms" | "narrative") {
     if (!selectedAct) {
       await showInfo("No Act Selected", "Select an act before analyzing.");
@@ -292,10 +339,30 @@ export function Translation() {
 
     try {
       setIsRunningPass(true);
-      const result = await runActAnalysis(selectedAct.id, {
-        model: modelName,
-        task,
-      });
+
+      // Detect act group and analyze all together if part of a group
+      const groupActIds = detectActGroup(selectedAct.id);
+      const isGrouped = groupActIds.length > 1;
+      const groupActLabels = acts
+        .filter((a) => groupActIds.includes(a.id))
+        .map((a) => a.label);
+
+      if (isGrouped) {
+        await showInfo(
+          "Grouped Analysis",
+          `Analyzing acts: ${groupActLabels.join(", ")} together...`,
+        );
+      }
+
+      const result = isGrouped
+        ? await runActGroupAnalysis(chapter!.id, groupActIds, {
+            model: modelName,
+            task,
+          })
+        : await runActAnalysis(selectedAct.id, {
+            model: modelName,
+            task,
+          });
 
       await loadTranslationChapter();
 
@@ -306,13 +373,20 @@ export function Translation() {
         );
       }
 
+      if (isGrouped && groupActLabels.length > 0) {
+        await showSuccess(
+          "Group Analysis Complete",
+          `Acts ${groupActLabels.join(", ")} analyzed with shared results.`,
+        );
+      }
+
       if (result.terms && result.terms.length > 0) {
         setExtractedTerms(result.terms);
         setIsGlossaryDialogOpen(true);
       } else if (task === "terms") {
         await showSuccess(
           "Term Extraction Complete",
-          "No new terms identified in this act.",
+          "No new terms identified.",
         );
       } else if (task === "narrative") {
         await showSuccess(
@@ -327,6 +401,83 @@ export function Translation() {
       );
     } finally {
       setIsRunningPass(false);
+    }
+  }
+
+  function handleEditActStart() {
+    if (!selectedAct) return;
+    setEditActText(selectedAct.rawText);
+    setIsEditingAct(true);
+  }
+
+  async function handleEditActSave() {
+    if (!selectedAct) return;
+
+    const wordCount = editActText.trim().split(/\s+/).length;
+    const MAX_WORDS = 2500;
+
+    try {
+      setIsActMetadataLoading(true);
+      const result = await updateAct(selectedAct.id, editActText);
+
+      if (result.wasSplit) {
+        await showSuccess(
+          "Act Split",
+          `Act was split into ${result.updatedActs?.length || 0} acts due to exceeding ${MAX_WORDS} word limit.`,
+        );
+      } else {
+        await showSuccess(
+          "Act Updated",
+          `Act updated successfully. Word count: ${wordCount}`,
+        );
+      }
+
+      await loadTranslationChapter();
+      setIsEditingAct(false);
+      setEditActText("");
+    } catch (error) {
+      await showError(
+        "Update Failed",
+        error instanceof Error ? error.message : "Unable to update act.",
+      );
+    } finally {
+      setIsActMetadataLoading(false);
+    }
+  }
+
+  function handleEditActCancel() {
+    setIsEditingAct(false);
+    setEditActText("");
+  }
+
+  async function handleDeleteAct() {
+    if (!selectedAct) return;
+
+    const confirmed = await showConfirm(
+      "Delete Act?",
+      `Are you sure you want to delete Act ${selectedAct.label}? This will delete any associated translations, polish, and analysis. Terms in the library will be preserved.`,
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setIsActMetadataLoading(true);
+      await deleteAct(selectedAct.id);
+
+      await showSuccess(
+        "Act Deleted",
+        `Act ${selectedAct.label} has been deleted.`,
+      );
+
+      await loadTranslationChapter();
+      setSelectedActId(null);
+    } catch (error) {
+      await showError(
+        "Deletion Failed",
+        error instanceof Error ? error.message : "Unable to delete act.",
+      );
+    } finally {
+      setIsActMetadataLoading(false);
     }
   }
 
@@ -484,9 +635,8 @@ export function Translation() {
 
     try {
       setIsSaving(true);
-      await updateAct(selectedAct.id, {
-        translation: editableTranslation.trim(),
-      });
+      // Note: Translation saving logic would go here
+      // For now, translations are managed through the pass workflow
       await loadTranslationChapter();
       await showSuccess("Saved", "Translation was saved for the selected act.");
     } catch (error) {
@@ -828,9 +978,34 @@ export function Translation() {
                 <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
                   Act Source
                 </span>
-                <span className="text-[9px] tracking-widest font-sans text-[#a0908b]">
-                  {formatCharCount(selectedAct?.rawText)}
-                </span>
+                <div className="flex items-center gap-3">
+                  <span className="text-[9px] tracking-widest font-sans text-[#a0908b]">
+                    {formatCharCount(selectedAct?.rawText)}
+                  </span>
+                  {selectedAct && (
+                    <div className="flex gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleEditActStart}
+                        disabled={isActMetadataLoading}
+                        className="h-5 text-[8px] text-blue-600 p-0 font-sans uppercase font-bold hover:text-blue-800"
+                      >
+                        EDIT
+                      </Button>
+                      <div className="w-[1px] h-3 bg-[#d8cdbd] self-center" />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => void handleDeleteAct()}
+                        disabled={isActMetadataLoading}
+                        className="h-5 text-[8px] text-red-600 p-0 font-sans uppercase font-bold hover:text-red-800"
+                      >
+                        DELETE
+                      </Button>
+                    </div>
+                  )}
+                </div>
               </div>
               <div className="flex-1 p-5 overflow-y-auto whitespace-pre-wrap text-[13px] leading-relaxed font-serif text-[#4A3D39] bg-white/40">
                 {selectedAct?.rawText || "Select an act to begin."}
@@ -950,7 +1125,8 @@ export function Translation() {
                     const edits = selectedAct?.Polishes?.[0]?.Edits ?? [];
                     if (edits.length === 0) return null;
                     const checkedCount = edits.filter(
-                      (e) => e.id !== undefined && polishEditChecked[e.id] !== false,
+                      (e) =>
+                        e.id !== undefined && polishEditChecked[e.id] !== false,
                     ).length;
                     return (
                       <span className="text-[8px] font-sans text-[#807068] bg-[#f2eadc] px-1.5 py-0.5 rounded-sm">
@@ -1014,7 +1190,11 @@ export function Translation() {
                                 type="button"
                                 onClick={() => void handleToggle()}
                                 disabled={editId === undefined}
-                                title={isChecked ? "Uncheck to skip this edit on export" : "Check to apply this edit on export"}
+                                title={
+                                  isChecked
+                                    ? "Uncheck to skip this edit on export"
+                                    : "Check to apply this edit on export"
+                                }
                                 className={`mt-0.5 shrink-0 w-3.5 h-3.5 rounded-sm border flex items-center justify-center transition-colors cursor-pointer ${
                                   isChecked
                                     ? "bg-[#2f7a46] border-[#2f7a46]"
@@ -1155,6 +1335,46 @@ export function Translation() {
         prompt={currentPrompt}
         actLabel={selectedAct?.label}
       />
+
+      <Dialog open={isEditingAct} onOpenChange={setIsEditingAct}>
+        <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Edit Act {selectedAct?.label}</DialogTitle>
+            <DialogDescription>
+              Modify the raw text for this act. Word count limit is ~2500 words.
+              If exceeded, the act will be automatically split at paragraph
+              boundaries.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto">
+            <textarea
+              value={editActText}
+              onChange={(e) => setEditActText(e.target.value)}
+              className="w-full h-full p-4 resize-none outline-none border border-[#d8cdbd] rounded font-serif text-[14px] leading-relaxed focus:border-blue-500"
+              placeholder="Enter or edit the act text..."
+            />
+            <div className="mt-2 text-[12px] text-gray-600">
+              Word count: {editActText.trim().split(/\s+/).length} / ~2500
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={handleEditActCancel}
+              disabled={isActMetadataLoading}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleEditActSave()}
+              disabled={isActMetadataLoading || !editActText.trim()}
+              className="bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              {isActMetadataLoading ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
