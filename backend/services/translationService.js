@@ -49,8 +49,15 @@ class TranslationService {
       userParts.push(`Literary analysis context:\n${analysisContext}`);
     }
 
+    const onomatopoeiaRules = `
+ONOMATOPOEIA RULES:
+- Convert source sound effects into descriptive English equivalents (e.g., horse sounds = 'Clop, clop', heartbeat = 'Thump-thump').
+- Avoid raw pinyin/phonetics (e.g., avoid 'Dada' for horse steps) unless it's a unique cultivation technique sound.
+- Maintain the 'density' requested in the narrative profile.`;
+
     userParts.push(
       "Task: Translate the following text into natural, faithful English. Preserve character voice, narrative tone, cultural nuance, and proper names. Return only the translated text.",
+      onomatopoeiaRules,
       "Source text:",
       rawActText
     );
@@ -245,19 +252,20 @@ class TranslationService {
     const cleanedTexts = acts.map((act) => {
       const activePolish = act.Polishes?.[0];
       const appliedEdits = activePolish?.Edits || [];
-      let text;
+      
+      // SOURCE OF TRUTH: Always start from the base Pass 3 translation
+      let text = act.anatomyProfile?.finalTranslation || act.translatedText || "";
 
-      if (activePolish && act.anatomyProfile?.finalTranslation) {
-        let patchedText = act.anatomyProfile.finalTranslation;
+      if (activePolish && text) {
+        let patchedText = text;
+        // APPLY ONLY USER-APPROVED EDITS:
         for (const edit of appliedEdits) {
-          if (edit.original && edit.replacement) {
+          if (edit.original && edit.replacement && edit.applied) {
             const regex = new RegExp(this.escapeRegExp(edit.original), "g");
             patchedText = patchedText.replace(regex, edit.replacement);
           }
         }
         text = patchedText;
-      } else {
-        text = act.translatedText || act.anatomyProfile?.finalTranslation || "";
       }
 
       return this.stripThinking(text);
@@ -286,34 +294,33 @@ class TranslationService {
     const parsed = JSON.parse(extractJson(content));
     const edits = parsed.edits || [];
 
-    let patchedText = act.anatomyProfile?.finalTranslation || "";
+    // Base text to match against (Pass 3)
+    const baseText = act.anatomyProfile?.finalTranslation || act.translatedText || "";
     const appliedEdits = [];
 
+    // Analyze which edits CAN be applied, but do not overwrite the main text yet
     for (const edit of edits) {
       if (edit.original && edit.replacement) {
         const escapedOriginal = this.escapeRegExp(edit.original);
-        let regex = new RegExp(escapedOriginal, "g");
+        const regex = new RegExp(escapedOriginal, "g");
 
-        if (!regex.test(patchedText)) {
-          const fuzzyOriginal = escapedOriginal.replace(/\s+/g, "\\s+");
-          regex = new RegExp(fuzzyOriginal, "g");
-        } else {
-          regex = new RegExp(escapedOriginal, "g");
-        }
-
-        if (regex.test(patchedText)) {
-          patchedText = patchedText.replace(regex, edit.replacement);
+        // Check if the original exists in the text
+        if (regex.test(baseText)) {
           appliedEdits.push({ ...edit, applied: true });
         } else {
-          appliedEdits.push({ ...edit, applied: false });
+          // If direct match fails, try fuzzy (case/whitespace insensitive) check
+          const fuzzyOriginal = escapedOriginal.replace(/\s+/g, "\\s+");
+          const fuzzyRegex = new RegExp(fuzzyOriginal, "gi");
+          appliedEdits.push({ ...edit, applied: fuzzyRegex.test(baseText) });
         }
       }
     }
 
-    act.translatedText = patchedText;
+    // Do NOT overwrite act.translatedText here. 
+    // It remains the Pass 3 version until we export.
     act.anatomyProfile = {
       ...profile,
-      pass4Polished: content,
+      pass4Polished: content, 
       pass4Edits: appliedEdits,
       pass4AppliedCount: appliedEdits.filter((e) => e.applied).length,
       pass4TotalCount: appliedEdits.length,
@@ -324,7 +331,7 @@ class TranslationService {
     const newPolish = await Polish.create({
       actId: act.id,
       modelUsed: resolvedModel,
-      content: patchedText,
+      content: content, // Store raw AI JSON output for reference
       editCount: appliedEdits.length,
       appliedCount: appliedEdits.filter((e) => e.applied).length,
       isActive: true,

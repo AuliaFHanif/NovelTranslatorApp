@@ -46,7 +46,7 @@ class LexicographerController {
       // Update chapter status
       await chapter.update({ status: "processing" });
 
-      // 2. Process each act in sequence order
+      // 2. Process acts, grouping sub-acts (1a, 1b...) together
       const results = {
         processed: 0,
         failed: [],
@@ -62,97 +62,70 @@ class LexicographerController {
 
       // Sort by sequence to ensure order
       const sortedActs = chapter.Acts.sort((a, b) => a.sequence - b.sequence);
+      const processedActIds = new Set();
 
       for (const act of sortedActs) {
+        if (processedActIds.has(act.id)) continue;
+
         try {
-          console.log(`[Phase 3] Analyzing act ${act.label} (${act.id})`);
+          // Detect if this act is part of a group
+          const groupActIds = analysisService.detectActGroup(act.id, sortedActs);
+          const groupActs = sortedActs.filter(a => groupActIds.includes(a.id));
+          
+          if (groupActs.length > 1) {
+            console.log(`[Phase 3] Analyzing group: ${groupActs.map(a => a.label).join(', ')}`);
+          } else {
+            console.log(`[Phase 3] Analyzing single act: ${act.label}`);
+          }
 
-          // Ensure act has access to parent Chapter/Series for analysis context
-          act.Chapter = chapter;
+          // Mark all in group as processed
+          groupActIds.forEach(id => processedActIds.add(id));
 
-          // CLEAR STALE LINKS: Remove existing appearances for this act before fresh analysis
+          // Ensure acts have parent context
+          groupActs.forEach(a => a.Chapter = chapter);
+
+          // Clear stale appearances and RESET the anatomyProfile for the whole group
+          // This ensures a "clean slate" for the fresh analysis
           await TermAppearance.destroy({
-            where: { actId: act.id },
+            where: { actId: groupActIds },
           });
 
-          // Run Phase 3 analysis in specialized passes
-          if (task === "all" || task === "terms") {
-            try {
-              console.log(
-                `[Phase 3] Pass 1: Extracting terms for act ${act.label} (3-pass sequence)`,
-              );
+          for (const gAct of groupActs) {
+            await gAct.update({
+              anatomyProfile: {
+                ...gAct.anatomyProfile,
+                linguistic: null,
+                narrative: null,
+                actAnalysisStatus: 'processing',
+                termExtractionStatus: 'processing'
+              }
+            });
+          }
 
-              // 3-Pass Term Extraction via Service
-              const combinedExtractedTerms =
-                await analysisService.runFullTermExtraction(act, { model });
+          // Run grouped analysis via service
+          const analysisResults = await analysisService.analyzeActGroup(groupActs, { model, task });
 
-              // Identify terms (approved vs candidates)
-              const { candidates, approvedCount } =
-                await glossaryProcessing.identifyTerms(
-                  combinedExtractedTerms,
-                  act,
+          // Aggregate term candidates from group
+          if (analysisResults.termsFound && analysisResults.termsFound.length > 0) {
+            results.glossary.appearances += analysisResults.termsFound.length * groupActs.length;
+            
+            // For each term found in the group, we need to identify it for each act
+            // to maintain proper database linking
+            for (const term of analysisResults.termsFound) {
+              for (const gAct of groupActs) {
+                const { candidates, approvedCount } = await glossaryProcessing.identifyTerms(
+                  [{ ...term, actId: gAct.id, actLabel: gAct.label }],
+                  gAct
                 );
-
-              results.glossary.appearances += combinedExtractedTerms.length;
-              results.glossary.merged += approvedCount;
-              allCandidates.push(...candidates);
-
-              await act.update({
-                anatomyProfile: {
-                  ...act.anatomyProfile,
-                  termExtractionStatus: "success",
-                },
-              });
-            } catch (err) {
-              await act.update({
-                anatomyProfile: {
-                  ...act.anatomyProfile,
-                  termExtractionStatus: "error",
-                },
-              });
-              throw err;
+                allCandidates.push(...candidates);
+                results.glossary.merged += approvedCount;
+              }
             }
           }
 
-          if (task === "all" || task === "narrative") {
-            try {
-              console.log(
-                `[Phase 3] Pass 2: Analyzing narrative for act ${act.label}`,
-              );
-              const narrativeResult = await analysisService.analyzeNarrative(
-                act,
-                { model },
-              );
-
-              // Update act with analysis results
-              await act.update({
-                anatomyProfile: {
-                  ...act.anatomyProfile, // Preserve existing data (like terms)
-                  linguistic: narrativeResult.linguisticAnalysis,
-                  narrative: narrativeResult.narrativeAnalysis,
-                  actAnalysisStatus: "success",
-                },
-              });
-            } catch (err) {
-              await act.update({
-                anatomyProfile: {
-                  ...act.anatomyProfile,
-                  actAnalysisStatus: "error",
-                },
-              });
-              throw err;
-            }
-          }
-
-          // Mark act as ready if at least one run was fully successful
-          await act.update({ status: "ready" });
-
-          // Note: We don't store strategy in Act table in new schema
-          // It's derived from anatomyProfile when needed
-
-          results.processed++;
+          results.processed += groupActs.length;
         } catch (err) {
-          console.error(`[Phase 3] Failed act ${act.id}:`, err.message);
+          console.error(`[Phase 3] Failed processing starting at act ${act.id}:`, err.message);
           results.failed.push({
             actId: act.id,
             label: act.label,
@@ -317,10 +290,22 @@ class LexicographerController {
         groupedActsLabels: groupActs.map((a) => a.label),
       };
 
-      // Clear existing appearances for all group members
+      // Clear existing appearances for all group members and reset profiles
       await TermAppearance.destroy({
         where: { actId: groupActIds },
       });
+
+      for (const gAct of groupActs) {
+        await gAct.update({
+          anatomyProfile: {
+            ...gAct.anatomyProfile,
+            linguistic: null,
+            narrative: null,
+            actAnalysisStatus: "processing",
+            termExtractionStatus: "processing",
+          },
+        });
+      }
 
       // Run grouped analysis
       try {

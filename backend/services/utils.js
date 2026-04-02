@@ -10,15 +10,24 @@
 function extractJson(str) {
   if (typeof str !== "string") return "";
   let cleaned = str.trim();
-  if (cleaned.startsWith("```json")) {
-    cleaned = cleaned.substring(7);
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned.substring(3);
+
+  // 1. Strip thinking blocks
+  cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+
+  // 2. Identify and extract JSON from markdown blocks
+  const jsonMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (jsonMatch) {
+    cleaned = jsonMatch[1].trim();
+  } else {
+    // 3. Fallback: find anything that looks like an object or array
+    const startIdx = cleaned.indexOf("{");
+    const endIdx = cleaned.lastIndexOf("}");
+    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+      cleaned = cleaned.substring(startIdx, endIdx + 1).trim();
+    }
   }
-  if (cleaned.endsWith("```")) {
-    cleaned = cleaned.substring(0, cleaned.length - 3);
-  }
-  return cleaned.trim();
+
+  return cleaned;
 }
 
 /**

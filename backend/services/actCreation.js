@@ -27,6 +27,7 @@ class ActCreationService {
 
     // Pre-calculate all metrics
     const paraMetrics = TextMetrics.calculateParagraphMetrics(paragraphs);
+    let actIndex = 1; // Narrative act counter
 
     for (let i = 0; i < boundaries.length; i++) {
       const startIdx = i === 0 ? 0 : boundaries[i - 1];
@@ -34,9 +35,12 @@ class ActCreationService {
 
       const actParagraphs = paragraphs.slice(startIdx, endIdx);
       const actText = actParagraphs.map(p => p.text).join('\n\n');
-      const metrics = TextMetrics.calculateParagraphMetrics(actParagraphs);
+      const metrics = paraMetrics.slice(startIdx, endIdx);
       const totalTokens = metrics.reduce((sum, m) => sum + m.estimatedTokens, 0);
       const totalWords = metrics.reduce((sum, m) => sum + m.unifiedWords, 0);
+
+      // Current major act label
+      const baseLabel = actIndex++;
 
       // Check if splitting needed
       const needsSplit = totalTokens > this.limits.maxTokensPerAct || 
@@ -47,7 +51,7 @@ class ActCreationService {
         const act = await this.createSingleAct({
           chapterId,
           sequence: sequence++,
-          label: String(sequence - 1),
+          label: String(baseLabel),
           rawText: actText,
           tokenCount: totalTokens,
           unifiedWordCount: totalWords,
@@ -57,7 +61,6 @@ class ActCreationService {
       } else {
         // Split into multiple acts
         const splits = this.calculateOptimalSplits(actParagraphs, metrics);
-        const baseLabel = sequence;
 
         for (let j = 0; j < splits.length; j++) {
           const split = splits[j];

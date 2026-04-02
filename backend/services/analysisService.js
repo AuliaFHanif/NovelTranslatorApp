@@ -17,9 +17,9 @@ class AnalysisService {
     const targetAct = allChapterActs.find((a) => a.id === actId);
     if (!targetAct) return [actId];
 
-    // Extract base label (e.g., "1" from "1A", "1" from "1B")
+    // Extract base label (e.g., "1" from "1a", "1" from "1B")
     const label = String(targetAct.label || "");
-    const baseLabel = label.replace(/[A-Z]$/, ""); // Remove suffix if present
+    const baseLabel = label.replace(/[a-zA-Z]$/, ""); // Remove suffix (case-insensitive)
 
     if (!baseLabel || baseLabel === label) {
       // No grouping detected (no letter suffix), return just this act
@@ -29,7 +29,7 @@ class AnalysisService {
     // Find all acts with same base label
     const groupActs = allChapterActs.filter((a) => {
       const aLabel = String(a.label || "");
-      const aBaseLabel = aLabel.replace(/[A-Z]$/, "");
+      const aBaseLabel = aLabel.replace(/[a-zA-Z]$/, "");
       return aBaseLabel === baseLabel;
     });
 
