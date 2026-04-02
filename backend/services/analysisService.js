@@ -75,8 +75,8 @@ class AnalysisService {
     };
 
     try {
-      // Run extraction on combined text if task includes "terms"
-      if (options.task === "all" || options.task === "terms") {
+      // Run extraction on combined text if task is "terms"
+      if (options.task === "terms") {
         try {
           console.log(`[Grouped Analysis] Pass 1: Extracting terms from group`);
           const combinedExtractedTerms = await this.runFullTermExtraction(
@@ -96,7 +96,7 @@ class AnalysisService {
         }
       }
 
-      // Run narrative analysis on combined text if task includes "narrative"
+      // Run narrative analysis on combined text if task is "all" or "narrative"
       let narrativeResult = null;
       if (options.task === "all" || options.task === "narrative") {
         try {
@@ -122,7 +122,8 @@ class AnalysisService {
           ...act.anatomyProfile,
         };
 
-        if (options.task === "all" || options.task === "terms") {
+        // Only update term status if we were running terms
+        if (options.task === "terms") {
           updatedProfile.termExtractionStatus = results.failed.some(
             (f) => f.stage === "term_extraction",
           )

@@ -85,20 +85,31 @@ class LexicographerController {
           groupActs.forEach(a => a.Chapter = chapter);
 
           // Clear stale appearances and RESET the anatomyProfile for the whole group
-          // This ensures a "clean slate" for the fresh analysis
-          await TermAppearance.destroy({
-            where: { actId: groupActIds },
-          });
+          // Only clear if the task is strictly "terms"
+          if (task === "terms") {
+            await TermAppearance.destroy({
+              where: { actId: groupActIds },
+            });
+          }
 
           for (const gAct of groupActs) {
+            const updatedProfile = { 
+              ...gAct.anatomyProfile,
+              // Maintain existing data if we are only doing partial tasks
+            };
+            
+            if (task === "terms") {
+              updatedProfile.termExtractionStatus = "processing";
+            }
+            
+            if (task === "all" || task === "narrative") {
+              updatedProfile.linguistic = null;
+              updatedProfile.narrative = null;
+              updatedProfile.actAnalysisStatus = "processing";
+            }
+            
             await gAct.update({
-              anatomyProfile: {
-                ...gAct.anatomyProfile,
-                linguistic: null,
-                narrative: null,
-                actAnalysisStatus: 'processing',
-                termExtractionStatus: 'processing'
-              }
+              anatomyProfile: updatedProfile
             });
           }
 
@@ -290,20 +301,28 @@ class LexicographerController {
         groupedActsLabels: groupActs.map((a) => a.label),
       };
 
-      // Clear existing appearances for all group members and reset profiles
-      await TermAppearance.destroy({
-        where: { actId: groupActIds },
-      });
+      // Only clear appearances if task is "terms"
+      if (task === "terms") {
+        await TermAppearance.destroy({
+          where: { actId: groupActIds },
+        });
+      }
 
       for (const gAct of groupActs) {
+        const updatedProfile = { ...gAct.anatomyProfile };
+        
+        if (task === "terms") {
+          updatedProfile.termExtractionStatus = "processing";
+        }
+        
+        if (task === "all" || task === "narrative") {
+          updatedProfile.linguistic = null;
+          updatedProfile.narrative = null;
+          updatedProfile.actAnalysisStatus = "processing";
+        }
+
         await gAct.update({
-          anatomyProfile: {
-            ...gAct.anatomyProfile,
-            linguistic: null,
-            narrative: null,
-            actAnalysisStatus: "processing",
-            termExtractionStatus: "processing",
-          },
+          anatomyProfile: updatedProfile
         });
       }
 
@@ -444,10 +463,26 @@ class LexicographerController {
         `[Grouped Analysis] Explicit group analysis for acts: ${acts.map((a) => a.label).join(", ")}`,
       );
 
-      // Clear existing appearances
-      await TermAppearance.destroy({
-        where: { actId: actIds },
-      });
+      // Only clear appearances if task is "terms"
+      if (task === "terms") {
+        await TermAppearance.destroy({
+          where: { actId: actIds },
+        });
+      }
+
+      // Update status for all acts before starting
+      for (const act of acts) {
+        const updatedProfile = { ...act.anatomyProfile };
+        if (task === "terms") {
+          updatedProfile.termExtractionStatus = "processing";
+        }
+        if (task === "all" || task === "narrative") {
+          updatedProfile.actAnalysisStatus = "processing";
+          updatedProfile.linguistic = null;
+          updatedProfile.narrative = null;
+        }
+        await act.update({ anatomyProfile: updatedProfile });
+      }
 
       // Run analysis
       const analysisResults = await analysisService.analyzeActGroup(acts, {
