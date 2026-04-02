@@ -1,326 +1,350 @@
-const { extractJson, estimateTokens } = require("./utils");
-const { resolveModel } = require("./resolveModel");
-const llmClient = require("./llmClient");
+/**
+ * Optimized AI Segmentation Service
+ * 
+ * Performance improvements:
+ * 1. Reduced max_tokens from 16000 to 2000 (major speedup)
+ * 2. Added batching for long chapters
+ * 3. Simplified prompt to reduce LLM processing time
+ * 4. Direct OpenAI client usage (no abstraction overhead)
+ */
 
+const OpenAI = require('openai');
+const TextMetrics = require('../utils/textMetrics');
+const config = require('../config/segmentation');
+const { resolveModel } = require('./resolveModel');
+
+// Initialize client once
+const client = new OpenAI({
+  baseURL: normalizeBaseUrl(process.env.LM_STUDIO_URL),
+  apiKey: process.env.LM_STUDIO_API_KEY || 'lm-studio',
+});
+
+function normalizeBaseUrl(url) {
+  const base = (url || 'http://localhost:1234').replace(/\/+$/, '');
+  return base.endsWith('/v1') ? base : `${base}/v1`;
+}
+
+// Simplified, faster JSON schema
 const segmentationSchema = {
-  type: "json_schema",
+  type: 'json_schema',
   json_schema: {
-    name: "scene_segmentation",
+    name: 'scene_segmentation',
     strict: true,
     schema: {
-      type: "object",
+      type: 'object',
       properties: {
         sceneBoundaries: {
-          type: "array",
-          description: "1-based paragraph indices where scenes end",
-          items: {
-            type: "integer",
-            minimum: 1,
-          },
+          type: 'array',
+          description: '1-based paragraph indices where scenes end',
+          items: { type: 'integer', minimum: 1 },
           minItems: 1,
         },
-        confidence: {
-          type: "array",
-          items: {
-            type: "number",
-            minimum: 0,
-            maximum: 1,
-          },
-        },
-        sceneTypes: {
-          type: "array",
-          items: {
-            type: "string",
-            enum: [
-              "dialogue",
-              "action",
-              "description",
-              "transition",
-              "monologue",
-            ],
-          },
-        },
+        // Optional fields removed from schema to speed up parsing
+        // Add back if needed: confidence, sceneTypes
       },
-      required: ["sceneBoundaries"],
+      required: ['sceneBoundaries'],
       additionalProperties: false,
     },
   },
 };
 
-function buildSegmentationPrompt(paragraphs) {
+/**
+ * Build optimized prompt - shorter = faster processing
+ */
+function buildSegmentationPrompt(paragraphs, startIndex = 0) {
+  const { paragraphPreviewLength } = config.ai;
+
   const formatted = paragraphs
-    .map((paragraph, i) => {
-      const preview =
-        paragraph.text.length > 200
-          ? `${paragraph.text.substring(0, 200)}...`
-          : paragraph.text;
-      return `[P${i + 1}] ${preview}`;
+    .map((p, i) => {
+      const globalIdx = startIndex + i + 1;
+      const preview = p.text.length > paragraphPreviewLength 
+        ? p.text.substring(0, paragraphPreviewLength) + '...'
+        : p.text;
+      return `[P${globalIdx}] ${preview}`;
     })
-    .join("\n\n");
+    .join('\n\n');
 
   return {
-    role: "user",
-    content: `Analyze this chapter and identify major scene boundaries.\n\nA scene is a continuous narrative unit with consistent:\n- Time (no time jumps)\n- Location (same setting)\n\nImportant constraints:\n- Do NOT create a new scene for minor POV shifts, internal monologues, or brief changes in character focus. If the characters are in the same time and location, keep them in the same scene.\n- You are selecting boundaries only.\n- Do NOT summarize, rewrite, or skip connective narrative detail.\n- Keep world-building and internal monologue inside scenes unless there is a true scene transition.\n- Ensure boundaries represent full contiguous coverage from P1 to the final paragraph.\n\nParagraphs:\n${formatted}\n\nIdentify paragraph indices where one scene ends and another begins.\nReturn boundaries as 1-based indices (e.g., [3, 7, 12] means scenes end at P3, P7, P12).`,
+    role: 'user',
+    content: `Segment the following chapter into 2-5 logical 'Acts'. An Act is a substantial narrative unit (typically 500-2000 words) encompassing multiple smaller scenes. Focus ONLY on major narrative shifts or POV changes.
+
+${formatted}
+
+Return 1-based paragraph indices where Acts end (e.g., [15, 48]). Avoid creating many small segments. We want high-level structure only.`,
   };
 }
 
-function parseResponseContent(content) {
-  if (!content) {
-    throw new Error("Empty AI response content");
+/**
+ * Fast JSON extraction without regex overhead for simple cases
+ */
+function fastExtractJson(str) {
+  if (typeof str !== 'string') return str;
+
+  str = str.trim();
+
+  // Fast path: already clean JSON
+  if (str.startsWith('{') && str.endsWith('}')) {
+    return str;
   }
 
-  if (typeof content === "string") {
-    try {
-      const cleaned = extractJson(content);
-      if (!cleaned || cleaned.length === 0) {
-        throw new Error("Extracted JSON is empty");
-      }
-      return JSON.parse(cleaned);
-    } catch (e) {
-      if (e instanceof SyntaxError) {
-        throw new Error(
-          `Invalid JSON from AI response: ${e.message}. Raw response: ${content.substring(0, 200)}`,
-        );
-      }
-      throw e;
+  // Handle markdown code blocks
+  if (str.startsWith('```json')) {
+    return str.substring(7, str.endsWith('```') ? str.length - 3 : str.length).trim();
+  }
+  if (str.startsWith('```')) {
+    return str.substring(3, str.endsWith('```') ? str.length - 3 : str.length).trim();
+  }
+
+  return str;
+}
+
+/**
+ * Parse with fallback
+ */
+function parseResponse(content) {
+  if (!content) throw new Error('Empty response');
+
+  if (typeof content === 'object') return content;
+
+  try {
+    const cleaned = fastExtractJson(content);
+    return JSON.parse(cleaned);
+  } catch (e) {
+    throw new Error(`JSON parse failed: ${e.message}`);
+  }
+}
+
+/**
+ * Check if text ends with sentence boundary
+ */
+function isStrongBoundary(text) {
+  if (!text) return false;
+  const t = text.trim();
+
+  // Avoid cutting after continuation punctuation
+  if (/[，、；：,;:"]$/.test(t)) return false;
+
+  // Prefer sentence-ending punctuation
+  return /[。！？.!?…」』】）》）]$/.test(t);
+}
+
+/**
+ * Align boundary to nearest good sentence break
+ */
+function alignBoundary(boundary, paragraphs, maxParagraph) {
+  if (boundary >= maxParagraph) return maxParagraph;
+  if (boundary <= 1) return 1;
+
+  // Already good?
+  if (isStrongBoundary(paragraphs[boundary - 1]?.text)) {
+    return boundary;
+  }
+
+  const { sentenceBoundaryWindow } = config.boundaries;
+
+  // Look forward first (prefer extending scene)
+  for (let delta = 1; delta <= sentenceBoundaryWindow; delta++) {
+    const forward = boundary + delta;
+    if (forward < maxParagraph && isStrongBoundary(paragraphs[forward - 1]?.text)) {
+      return forward;
     }
   }
 
-  if (typeof content === "object") {
-    return content;
+  // Then look backward
+  for (let delta = 1; delta <= sentenceBoundaryWindow; delta++) {
+    const backward = boundary - delta;
+    if (backward >= 1 && isStrongBoundary(paragraphs[backward - 1]?.text)) {
+      return backward;
+    }
   }
 
-  throw new Error("Unsupported AI response content type");
+  return boundary;
 }
 
-function isStrongBoundaryParagraph(text) {
-  const value = (text || "").trim();
-  if (!value) {
-    return false;
-  }
-
-  // Avoid cutting after continuation punctuation that often indicates in-progress dialogue/thought.
-  if (/[，、；：,:]$/.test(value)) {
-    return false;
-  }
-
-  // Prefer end-of-sentence style punctuation for cleaner scene transitions.
-  return /[。！？!?…]$/.test(value) || /[」』】）》）)]$/.test(value);
-}
-
-function smoothBoundaries(boundaries, paragraphs) {
+/**
+ * Merge tiny acts and enforce minimum sizes
+ */
+function optimizeBoundaries(boundaries, paragraphs) {
   const maxParagraph = paragraphs.length;
-  const normalized = [...new Set(boundaries)]
-    .map((v) => Number(v))
-    .filter((v) => Number.isInteger(v) && v >= 1 && v <= maxParagraph)
-    .sort((a, b) => a - b);
+  const { minTokensPerAct, minUnifiedWordsPerAct, minLastActWords } = config.boundaries;
 
-  const MIN_TOKENS_PER_ACT = Number(process.env.MIN_ACT_TOKENS) || 400;
-  const adjusted = [];
+  // Align all boundaries to good break points
+  const aligned = boundaries.map(b => alignBoundary(b, paragraphs, maxParagraph));
+  const deduped = [...new Set(aligned)].sort((a, b) => a - b);
 
-  for (const rawBoundary of normalized) {
-    if (rawBoundary === maxParagraph) {
-      adjusted.push(rawBoundary);
-      continue;
-    }
-
-    let candidate = rawBoundary;
-    if (!isStrongBoundaryParagraph(paragraphs[candidate - 1]?.text)) {
-      // Prefer a nearby forward sentence end for continuity, then fall back backward.
-      let found = false;
-
-      for (let delta = 1; delta <= 2; delta += 1) {
-        const forward = rawBoundary + delta;
-        if (
-          forward < maxParagraph &&
-          isStrongBoundaryParagraph(paragraphs[forward - 1]?.text)
-        ) {
-          candidate = forward;
-          found = true;
-          break;
-        }
-      }
-
-      if (!found) {
-        for (let delta = 1; delta <= 2; delta += 1) {
-          const backward = rawBoundary - delta;
-          if (
-            backward >= 1 &&
-            isStrongBoundaryParagraph(paragraphs[backward - 1]?.text)
-          ) {
-            candidate = backward;
-            break;
-          }
-        }
-      }
-    }
-
-    adjusted.push(candidate);
+  // Ensure coverage
+  if (deduped[deduped.length - 1] !== maxParagraph) {
+    deduped.push(maxParagraph);
   }
 
-  const dedupedAdjusted = [...new Set(adjusted)].sort((a, b) => a - b);
+  // Calculate metrics for each span
+  const paraMetrics = TextMetrics.calculateParagraphMetrics(paragraphs);
+  const cumulative = TextMetrics.getCumulativeMetrics(paraMetrics);
 
-  // Avoid over-fragmenting into tiny acts by accumulating tokens.
-  const spanFiltered = [];
+  const optimized = [];
   let lastBoundary = 0;
   let accumulatedTokens = 0;
+  let accumulatedWords = 0;
 
-  for (const boundary of dedupedAdjusted) {
-    let spanTokens = 0;
-    for (let i = lastBoundary; i < boundary; i++) {
-      const text = paragraphs[i]?.text || "";
-      spanTokens += estimateTokens(text);
-    }
-    accumulatedTokens += spanTokens;
-
+  for (let i = 0; i < deduped.length; i++) {
+    const boundary = deduped[i];
     const isFinal = boundary === maxParagraph;
+
+    // Calculate span metrics
+    const spanTokens = cumulative[boundary - 1].estimatedTokens - 
+                      (lastBoundary > 0 ? cumulative[lastBoundary - 1].estimatedTokens : 0);
+    const spanWords = cumulative[boundary - 1].unifiedWords - 
+                     (lastBoundary > 0 ? cumulative[lastBoundary - 1].unifiedWords : 0);
+
+    accumulatedTokens += spanTokens;
+    accumulatedWords += spanWords;
+
     if (isFinal) {
-      // Mechanical check for last act size (User requested < 10 words)
-      let lastActText = "";
-      for (let i = lastBoundary; i < boundary; i++) {
-        lastActText += (paragraphs[i]?.text || "") + " ";
-      }
-
-      const cjkMatch = lastActText.match(
-        /[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]/g,
-      );
-      const cjkCount = cjkMatch ? cjkMatch.length : 0;
-      const nonCjkText = lastActText.replace(
-        /[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]/g,
-        " ",
-      );
-      const wordMatch = nonCjkText.match(/\b\w+\b/g);
-      const wordCount = wordMatch ? wordMatch.length : 0;
-      const totalWords = cjkCount + wordCount;
-
-      if (spanFiltered.length > 0 && totalWords < 10) {
-        // Combine into previous act by updating its boundary to the end
-        spanFiltered[spanFiltered.length - 1] = maxParagraph;
+      console.log(`[Segmentation] Final boundary at ${boundary}. Span: ${spanWords} words, ${spanTokens} tokens.`);
+      // Check if last act is too small
+      if (optimized.length > 0 && spanWords < minLastActWords) {
+        console.log(`[Segmentation] Last act too small (${spanWords} < ${minLastActWords}), merging with previous.`);
+        optimized[optimized.length - 1] = maxParagraph;
       } else {
-        spanFiltered.push(boundary);
+        optimized.push(boundary);
       }
-    } else if (accumulatedTokens >= MIN_TOKENS_PER_ACT) {
-      spanFiltered.push(boundary);
+    } else if (accumulatedTokens >= minTokensPerAct || accumulatedWords >= minUnifiedWordsPerAct) {
+      console.log(`[Segmentation] Keeping boundary ${boundary}. Accumulated: ${accumulatedWords} words, ${accumulatedTokens} tokens.`);
+      optimized.push(boundary);
       lastBoundary = boundary;
       accumulatedTokens = 0;
+      accumulatedWords = 0;
+    } else {
+      console.log(`[Segmentation] Skipping AI boundary ${boundary}. Accumulated only ${accumulatedWords} words.`);
     }
   }
 
-  const finalBoundaries =
-    spanFiltered.length > 0 ? spanFiltered : [maxParagraph];
+  console.log(`[Segmentation] Optimized ${deduped.length} boundaries down to ${optimized.length}.`);
 
-  if (finalBoundaries[finalBoundaries.length - 1] !== maxParagraph) {
-    finalBoundaries.push(maxParagraph);
+  // Ensure we have at least one boundary
+  if (optimized.length === 0) {
+    optimized.push(maxParagraph);
   }
 
-  return finalBoundaries;
+  return optimized;
 }
 
-async function callSegmentationAI(paragraphs, retries = 3, options = {}) {
-  if (!Array.isArray(paragraphs) || paragraphs.length === 0) {
-    throw new Error("Cannot segment empty paragraph list");
+/**
+ * Call AI with timeout and retry logic
+ */
+async function callAIWithRetry(messages, attempt = 0) {
+  const { maxTokens, temperature, temperatureIncrement, maxRetries } = config.ai;
+
+  const temp = temperature + (attempt * temperatureIncrement);
+
+  try {
+    const response = await client.chat.completions.create({
+      model: await resolveModel(),
+      messages,
+      response_format: segmentationSchema,
+      temperature: temp,
+      max_tokens: maxTokens,
+    });
+
+    return response?.choices?.[0]?.message?.content;
+  } catch (error) {
+    if (attempt < maxRetries - 1) {
+      console.warn(`AI call failed (attempt ${attempt + 1}), retrying...`);
+      await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); // Exponential backoff
+      return callAIWithRetry(messages, attempt + 1);
+    }
+    throw error;
   }
+}
 
-  const modelId = await resolveModel(options.model);
-
+/**
+ * Process a single batch of paragraphs
+ */
+async function processBatch(paragraphs, startIndex) {
   const messages = [
     {
-      role: "system",
-      content:
-        "You are a literary scene analyzer for Japanese and Chinese web novels. Identify scene boundaries objectively.",
+      role: 'system',
+      content: 'You are a senior literary orchestrator specializing in book-length narrative structure. Your goal is to segment a raw chapter into several (typically 2-5) major Narrative Acts. Avoid identifying minor scene shifts; focus ONLY on the most significant turning points, POV shifts, or climax/resolution boundaries.',
     },
-    buildSegmentationPrompt(paragraphs),
+    buildSegmentationPrompt(paragraphs, startIndex),
   ];
 
-  for (let attempt = 0; attempt < retries; attempt += 1) {
-    try {
-      const content = await llmClient.chatCompletion({
-        model: modelId,
-        messages,
-        response_format: segmentationSchema,
-        temperature: 0.2,
-        max_tokens: 16000,
-      });
+  const content = await callAIWithRetry(messages);
+  const result = parseResponse(content);
 
-      console.log(
-        `[AI Segmentation] Attempt ${attempt + 1} raw response type: ${typeof content}`,
-      );
-      if (typeof content === "string" && content.length > 0) {
-        console.log(
-          `[AI Segmentation] Response preview: ${content.substring(0, 200)}`,
-        );
-      }
+  if (!result.sceneBoundaries || !Array.isArray(result.sceneBoundaries)) {
+    throw new Error('Invalid response: missing sceneBoundaries');
+  }
 
-      const result = parseResponseContent(content);
+  return result.sceneBoundaries;
+}
 
-      if (!result.sceneBoundaries || !Array.isArray(result.sceneBoundaries)) {
-        throw new Error(
-          "Invalid response: sceneBoundaries missing or not an array",
-        );
-      }
+/**
+ * Main entry point - handles batching for long chapters
+ */
+async function callSegmentationAI(paragraphs, options = {}) {
+  if (!Array.isArray(paragraphs) || paragraphs.length === 0) {
+    throw new Error('Cannot segment empty paragraph list');
+  }
 
-      if (result.sceneBoundaries.length === 0) {
-        throw new Error("Invalid response: sceneBoundaries is empty");
-      }
+  const { maxParagraphsInPrompt, batchSize } = config.ai;
+  const { enableBatchProcessing } = config.performance;
 
-      const maxParagraph = paragraphs.length;
-      console.log(
-        `[AI Segmentation] Raw boundaries: [${result.sceneBoundaries.join(", ")}], max paragraphs: ${maxParagraph}`,
-      );
+  // Short chapter: single call
+  if (!enableBatchProcessing || paragraphs.length <= maxParagraphsInPrompt) {
+    const boundaries = await processBatch(paragraphs, 0);
+    const optimized = optimizeBoundaries(boundaries, paragraphs);
 
-      const deduped = [...new Set(result.sceneBoundaries)]
-        .map((v) => Number(v))
-        .filter((v) => Number.isInteger(v))
-        .sort((a, b) => a - b);
+    return {
+      boundaries: optimized,
+      source: 'ai',
+      batchCount: 1,
+    };
+  }
 
-      console.log(
-        `[AI Segmentation] Deduped boundaries: [${deduped.join(", ")}]`,
-      );
+  // Long chapter: batch processing
+  console.log(`[Segmentation] Long chapter detected (${paragraphs.length} paragraphs), using batching`);
 
-      const invalid = deduped.filter(
-        (boundary) => boundary < 1 || boundary > maxParagraph,
-      );
-      if (invalid.length > 0) {
-        throw new Error(
-          `Boundaries out of range. Valid range is 1-${maxParagraph}, but got: [${invalid.join(", ")}]`,
-        );
-      }
+  const allBoundaries = [];
+  let globalOffset = 0;
 
-      const boundaries = deduped.length > 0 ? deduped : [maxParagraph];
-      if (boundaries[boundaries.length - 1] !== maxParagraph) {
-        boundaries.push(maxParagraph);
-      }
+  // Process in overlapping batches for continuity
+  const overlap = 5; // paragraphs of overlap between batches
 
-      console.log(
-        `[AI Segmentation] Final boundaries before smoothing: [${boundaries.join(", ")}]`,
-      );
+  for (let i = 0; i < paragraphs.length; i += (batchSize - overlap)) {
+    const batch = paragraphs.slice(i, i + batchSize);
+    const batchBoundaries = await processBatch(batch, i);
 
-      const smoothedBoundaries = smoothBoundaries(boundaries, paragraphs);
-      console.log(
-        `[AI Segmentation] Smoothed boundaries: [${smoothedBoundaries.join(", ")}]`,
-      );
+    // Adjust boundaries to global indices
+    const adjusted = batchBoundaries.map(b => b + i);
 
-      return {
-        boundaries: smoothedBoundaries,
-        confidence: Array.isArray(result.confidence) ? result.confidence : [],
-        sceneTypes: Array.isArray(result.sceneTypes) ? result.sceneTypes : [],
-        source: "ai",
-      };
-    } catch (error) {
-      console.error(
-        `AI segmentation attempt ${attempt + 1} failed:`,
-        error.message,
-      );
-      if (attempt === retries - 1) {
-        throw error;
-      }
+    // Filter out boundaries in the overlap zone (except the last one)
+    const effectiveBoundaries = adjusted.filter(b => {
+      const isInOverlap = b > (i + batchSize - overlap);
+      const isLastBatch = (i + batchSize) >= paragraphs.length;
+      return !isInOverlap || isLastBatch;
+    });
+
+    allBoundaries.push(...effectiveBoundaries);
+
+    // Small delay between batches to avoid rate limiting
+    if (i + batchSize < paragraphs.length) {
+      await new Promise(r => setTimeout(r, 500));
     }
   }
 
-  throw new Error("AI segmentation exhausted retries");
+  const optimized = optimizeBoundaries(allBoundaries, paragraphs);
+
+  return {
+    boundaries: optimized,
+    source: 'ai',
+    batchCount: Math.ceil(paragraphs.length / (batchSize - overlap)),
+  };
 }
 
 module.exports = {
   callSegmentationAI,
   buildSegmentationPrompt,
+  optimizeBoundaries,
+  alignBoundary,
 };

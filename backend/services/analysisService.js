@@ -238,21 +238,61 @@ class AnalysisService {
   }
 
   /**
-   * Pass 1: Full 3-pass Term Extraction
+   * Pass 1: Unified Term Extraction (Optimized Single Call)
+   * Combines character, location/org, and item/concept/technique extraction into one LLM call
+   */
+  async runUnifiedTermExtraction(act, options = {}) {
+    const language = act.Chapter?.Series?.language;
+    if (!language || !["ja", "zh"].includes(language)) {
+      throw new Error(`Unsupported language: ${language}`);
+    }
+
+    const modelId = await resolveModel(options.model);
+    const startTime = Date.now();
+
+    const messages = [
+      {
+        role: "system",
+        content: this.buildUnifiedExtractionPrompt(language),
+      },
+      {
+        role: "user",
+        content: this.buildTermExtractionUserPrompt(act),
+      },
+    ];
+
+    try {
+      const content = await llmClient.chatCompletion({
+        model: modelId,
+        messages,
+        response_format: schemas.terms.unified,
+        temperature: 0.1,
+        max_tokens: 2000, // Increased from 1500 to accommodate combined extraction
+      });
+
+      const result = JSON.parse(extractJson(content));
+      const duration = Date.now() - startTime;
+
+      console.log(
+        `[LLM] Unified extraction (Act ${act.id}): ${result.extractedTerms?.length || 0} terms in ${duration}ms`,
+      );
+
+      return this.sanitizeResult(result).extractedTerms || [];
+    } catch (err) {
+      console.error(
+        `Unified term extraction failed for act ${act.id}:`,
+        err.message,
+      );
+      throw err;
+    }
+  }
+
+  /**
+   * Pass 1: Full Term Extraction (Legacy 3-pass for backward compatibility)
    */
   async runFullTermExtraction(act, options = {}) {
-    const characterResult = await this.extractCharacters(act, options);
-    const locationOrgResult = await this.extractLocationsAndOrgs(act, options);
-    const itemConceptsResult = await this.extractItemsConceptsTechniques(
-      act,
-      options,
-    );
-
-    return [
-      ...(characterResult.extractedTerms || []),
-      ...(locationOrgResult.extractedTerms || []),
-      ...(itemConceptsResult.extractedTerms || []),
-    ];
+    // Use unified extraction instead of 3 sequential calls
+    return this.runUnifiedTermExtraction(act, options);
   }
 
   /**
@@ -363,6 +403,46 @@ STRICT EXTRACTION RULES:
    - "proposedTranslation": A clear literary English name (e.g., "Nine Heavens Dragon Sword", "Qi Condensation").
    - "context": A brief English snippet of how it's used or what it means.
    - All descriptions MUST be in ENGLISH.`;
+  };
+
+  buildUnifiedExtractionPrompt = (language) => {
+    return `You are a precision lexicographer for ${language === "ja" ? "Japanese" : "Chinese"} web novels.
+Your task is to extract ALL RELEVANT TERMS for a series glossary in a single pass.
+
+STRICT EXTRACTION RULES:
+
+**CHARACTERS** (type: "character"):
+- Main characters, side characters, notable figures.
+- Pets or titled entities functioning as characters.
+
+**LOCATIONS** (type: "location"):
+- Cities, continents, realms, distinct geographical features, specific buildings.
+
+**ORGANIZATIONS** (type: "organization"):
+- Sects, gangs, guilds, families, clans, empires.
+
+**ITEMS** (type: "item"):
+- Weapons, artifacts, pills, currency, distinct materials.
+
+**CONCEPTS** (type: "concept"):
+- Unique world terms, societal rules, realms of cultivation/magic, special states of being.
+
+**TECHNIQUES** (type: "technique"):
+- Martial arts moves, magic spells, secret arts.
+
+GENERAL RULES:
+1. Extract ONLY the categories above. Do NOT extract generic words, common adjectives, or general dialogs.
+2. For each term, assign EXACTLY ONE of the 6 types listed above.
+3. Do NOT include the same term multiple times.
+4. Ensure high-quality extractions with confidence ≥ 0.6.
+
+FORMATTING:
+- "term": The EXACT source text (JA/ZH characters).
+- "type": One of: character, location, organization, item, concept, technique.
+- "proposedTranslation": A clear, literary English translation or phonetic name (e.g., "Pinyin" for Chinese, "Romaji" for Japanese), properly capitalized.
+- "context": A brief English snippet explaining what it is or how it's used.
+- "confidence": Your confidence the extraction is correct (0.0-1.0, use 0.6 minimum).
+- All descriptions MUST be in ENGLISH.`;
   };
 
   buildTermExtractionUserPrompt(act) {

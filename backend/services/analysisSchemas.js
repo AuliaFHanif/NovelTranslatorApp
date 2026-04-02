@@ -305,7 +305,12 @@ const chineseNarrativeSchema = {
                   contextualMeaning: { type: "string" },
                   preserve: { type: "boolean" },
                 },
-                required: ["idiom", "literalMeaning", "contextualMeaning", "preserve"],
+                required: [
+                  "idiom",
+                  "literalMeaning",
+                  "contextualMeaning",
+                  "preserve",
+                ],
               },
             },
 
@@ -460,6 +465,50 @@ const chineseNarrativeSchema = {
   },
 };
 
+// --- UNIFIED TERM EXTRACTION (OPTIMIZED SINGLE PASS) ---
+const unifiedTermExtractionSchema = {
+  type: "json_schema",
+  json_schema: {
+    name: "unified_term_extraction",
+    strict: true,
+    schema: {
+      type: "object",
+      properties: {
+        extractedTerms: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              term: { type: "string" },
+              type: {
+                enum: [
+                  "character",
+                  "location",
+                  "organization",
+                  "item",
+                  "concept",
+                  "technique",
+                ],
+              },
+              context: { type: "string" },
+              proposedTranslation: { type: "string" },
+              confidence: { type: "number", minimum: 0, maximum: 1 },
+            },
+            required: [
+              "term",
+              "type",
+              "context",
+              "proposedTranslation",
+              "confidence",
+            ],
+          },
+        },
+      },
+      required: ["extractedTerms"],
+    },
+  },
+};
+
 const polishSchema = {
   type: "json_schema",
   json_schema: {
@@ -503,6 +552,7 @@ module.exports = {
     character: characterSchema,
     locationOrg: locationOrgSchema,
     itemConceptTechnique: itemConceptTechniqueSchema,
+    unified: unifiedTermExtractionSchema,
   },
   narrative: {
     ja: japaneseNarrativeSchema,

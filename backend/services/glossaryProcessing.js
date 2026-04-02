@@ -1,4 +1,6 @@
 const { GlossaryTerm, TermAppearance } = require("../models");
+const { loadSeriesGlossary, clearCache } = require("./glossaryCache");
+const config = require("../config/config.json");
 
 class GlossaryProcessingService {
   /**
@@ -20,9 +22,20 @@ class GlossaryProcessingService {
     const seriesId = act.Chapter?.seriesId;
     const language = act.Chapter?.Series?.language;
     const candidates = [];
+    const approvedAppearances = []; // Batch collect appearances
     let approvedCount = 0;
 
-    for (const extracted of extractedTerms) {
+    // Load glossary cache for this series (lazy-load per act)
+    const glossaryCache = await loadSeriesGlossary(seriesId);
+    const queryCountStart = this._dbQueryCount || 0;
+
+    // Apply term validation first
+    const validatedTerms = this.validateExtractedTerms(extractedTerms);
+    console.log(
+      `[TermValidation] Validated ${validatedTerms.length}/${extractedTerms.length} terms`,
+    );
+
+    for (const extracted of validatedTerms) {
       try {
         // Normalize extracted data (handle potential AI property name variations)
         const normalized = {
@@ -53,11 +66,10 @@ class GlossaryProcessingService {
           continue;
         }
 
-        // 1. Check if term already exists and is approved
-        const existingTerm = await this.findExistingTerm(
+        // 1. Check if term already exists and is approved (using cache)
+        const existingTerm = this.findExistingTermFromCache(
           normalized,
-          seriesId,
-          language,
+          glossaryCache,
         );
 
         if (existingTerm && existingTerm.status === "approved") {
@@ -65,7 +77,13 @@ class GlossaryProcessingService {
           console.log(
             `[Phase 3] Logging appearance for EXISTING APPROVED term: ${normalized.term}`,
           );
-          await this.recordAppearance(existingTerm.id, act.id, normalized);
+          approvedAppearances.push({
+            termId: existingTerm.id,
+            actId: act.id,
+            contextSentence: normalized.context,
+            confidence: normalized.confidence,
+            extractedAt: new Date(),
+          });
           approvedCount++;
 
           // Also handle variants for existing terms
@@ -87,11 +105,124 @@ class GlossaryProcessingService {
       }
     }
 
+    // Batch insert all approved appearances
+    if (approvedAppearances.length > 0) {
+      try {
+        await TermAppearance.bulkCreate(approvedAppearances, {
+          fields: [
+            "termId",
+            "actId",
+            "contextSentence",
+            "confidence",
+            "extractedAt",
+          ],
+          ignoreDuplicates: true,
+        });
+        console.log(
+          `[Batch] Inserted ${approvedAppearances.length} approved appearances in 1 batch`,
+        );
+      } catch (err) {
+        console.error(`Failed to batch insert appearances:`, err.message);
+      }
+    }
+
     return { candidates, approvedCount };
   }
 
   /**
-   * Find an existing term by various matching strategies
+   * Validate extracted terms against configured thresholds
+   * Filters: min length, confidence, stopwords, duplicates
+   */
+  validateExtractedTerms(extractedTerms) {
+    const devConfig = config[process.env.NODE_ENV || "development"];
+    const extraction = devConfig?.extraction || {};
+
+    const minLength = extraction.minTermLength || 2;
+    const confidenceThreshold = extraction.confidenceThreshold || 0.6;
+    const maxTermsPerAct = extraction.maxTermsPerAct || 50;
+    const stopwords = extraction.stopwords || [];
+
+    const validated = [];
+    const seen = new Set();
+
+    for (const term of extractedTerms) {
+      // Check: term length
+      if (term.term && term.term.length < minLength) {
+        console.log(
+          `[TermValidation] Skipping "${term.term}" - too short (< ${minLength} chars)`,
+        );
+        continue;
+      }
+
+      // Check: confidence threshold
+      if (
+        typeof term.confidence === "number" &&
+        term.confidence < confidenceThreshold
+      ) {
+        console.log(
+          `[TermValidation] Skipping "${term.term}" - confidence ${term.confidence} < ${confidenceThreshold}`,
+        );
+        continue;
+      }
+
+      // Check: stopwords
+      if (stopwords.includes(term.term)) {
+        console.log(`[TermValidation] Skipping "${term.term}" - is a stopword`);
+        continue;
+      }
+
+      // Check: duplicates within this extraction
+      if (seen.has(term.term)) {
+        console.log(
+          `[TermValidation] Skipping "${term.term}" - duplicate within extraction`,
+        );
+        continue;
+      }
+      seen.add(term.term);
+
+      validated.push(term);
+
+      // Check: max terms per act
+      if (validated.length >= maxTermsPerAct) {
+        console.log(
+          `[TermValidation] Reached max ${maxTermsPerAct} terms for this act`,
+        );
+        break;
+      }
+    }
+
+    return validated;
+  }
+
+  /**
+   * Find existing term from in-memory cache (O(1) lookup)
+   */
+  findExistingTermFromCache(extracted, glossaryCache) {
+    const { byCanonical, byJa, byZh, byVariant } = glossaryCache;
+
+    // Try canonical form
+    let term = byCanonical.get(extracted.term);
+    if (term && term.type === extracted.type) return term;
+
+    // Try language-specific field
+    if (extracted.language === "ja") {
+      term = byJa.get(extracted.term);
+      if (term && term.type === extracted.type) return term;
+    } else if (extracted.language === "zh") {
+      term = byZh.get(extracted.term);
+      if (term && term.type === extracted.type) return term;
+    }
+
+    // Try variant lookup
+    term = byVariant.get(extracted.term);
+    if (term && term.type === extracted.type) return term;
+
+    return null;
+  }
+
+  /**
+   * Find an existing term by various matching strategies (fallback method, uses DB)
+   * Used when cache is not available - kept for backward compatibility
    */
   async findExistingTerm(extracted, seriesId, language) {
     const termField = language === "ja" ? "termJa" : "termZh";
@@ -351,36 +482,34 @@ class GlossaryProcessingService {
   }
 
   /**
-   * Detect conflicts: identify if terms already exist in library
+   * Detect conflicts: identify if terms already exist in library (uses cache)
    * Returns: { existing (already approved), conflicts (duplicates with different translations), newest (truly new) }
    */
   async detectTermConflicts(candidateTerms, seriesId, language) {
-    const termField = language === "ja" ? "termJa" : "termZh";
     const result = {
       newTerms: [],
       existingTerms: [],
       conflictTerms: [],
     };
 
+    // Load cache for efficient lookups
+    const glossaryCache = await loadSeriesGlossary(seriesId);
+    const { byCanonical, byJa, byZh, byVariant, allTerms } = glossaryCache;
+    const termField = language === "ja" ? "termJa" : "termZh";
+
     for (const candidate of candidateTerms) {
-      // Try to find existing term with same canonical form or language field
-      const existingByCanonical = await GlossaryTerm.findOne({
-        where: {
-          seriesId,
-          canonicalForm: candidate.term,
-          type: candidate.type,
-        },
-      });
+      // Try cache lookups first (O(1))
+      let existing =
+        byCanonical.get(candidate.term) ||
+        (termField === "termJa"
+          ? byJa.get(candidate.term)
+          : byZh.get(candidate.term)) ||
+        byVariant.get(candidate.term);
 
-      const existingByLang = await GlossaryTerm.findOne({
-        where: {
-          seriesId,
-          [termField]: candidate.term,
-          type: candidate.type,
-        },
-      });
-
-      const existing = existingByCanonical || existingByLang;
+      // Filter by type
+      if (existing && existing.type !== candidate.type) {
+        existing = null;
+      }
 
       if (existing) {
         // Term already exists - check if it's a duplicate or conflict

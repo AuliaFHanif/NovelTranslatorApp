@@ -1,219 +1,217 @@
-const { Act, ActDependency } = require("../models");
-const { countWords } = require("./utils");
+/**
+ * Optimized Act Creation Service
+ * 
+ * Improvements:
+ * 1. Unified metrics (no duplicate counting)
+ * 2. Cleaner split logic
+ * 3. Better dependency chain creation
+ * 4. Configurable limits
+ */
 
-// Hardcoded limit: 50 words per act
-const ACT_WORD_LIMIT = 50;
+const { Act, ActDependency } = require('../models');
+const TextMetrics = require('../utils/textMetrics');
+const config = require('../config/segmentation');
 
 class ActCreationService {
+  constructor() {
+    this.limits = config.boundaries;
+  }
+
   /**
-   * Create acts from segmentation boundaries
-   * Splits any act exceeding 50 words into multiple pieces at paragraph boundaries
-   * @param {number} chapterId
-   * @param {Array} paragraphs - Normalized paragraphs
-   * @param {Object} segmentation - { boundaries: [], source: 'ai'|'fallback' }
+   * Main entry: Create acts from segmentation boundaries
    */
   async createActs(chapterId, paragraphs, segmentation) {
     const { boundaries, source } = segmentation;
     const createdActs = [];
     let sequence = 1;
 
+    // Pre-calculate all metrics
+    const paraMetrics = TextMetrics.calculateParagraphMetrics(paragraphs);
+
     for (let i = 0; i < boundaries.length; i++) {
       const startIdx = i === 0 ? 0 : boundaries[i - 1];
       const endIdx = boundaries[i];
 
       const actParagraphs = paragraphs.slice(startIdx, endIdx);
-      const actText = actParagraphs.map((p) => p.text).join("\n\n");
+      const actText = actParagraphs.map(p => p.text).join('\n\n');
+      const metrics = TextMetrics.calculateParagraphMetrics(actParagraphs);
+      const totalTokens = metrics.reduce((sum, m) => sum + m.estimatedTokens, 0);
+      const totalWords = metrics.reduce((sum, m) => sum + m.unifiedWords, 0);
 
-      // Split the act if needed
-      const splits = this.splitActByLimit(actText, actParagraphs);
-      const labelBase = sequence; // Base label (e.g., "9" for "9a", "9b")
-      const splitActIds = []; // Track all splits from this boundary for linking
+      // Check if splitting needed
+      const needsSplit = totalTokens > this.limits.maxTokensPerAct || 
+                        totalWords > this.limits.maxUnifiedWordsPerAct;
 
-      for (let j = 0; j < splits.length; j++) {
-        const split = splits[j];
-        const labelSuffix =
-          splits.length === 1 ? "" : String.fromCharCode(97 + j); // a, b, c, ...
+      if (!needsSplit) {
+        // Create single act
+        const act = await this.createSingleAct({
+          chapterId,
+          sequence: sequence++,
+          label: String(sequence - 1),
+          rawText: actText,
+          tokenCount: totalTokens,
+          unifiedWordCount: totalWords,
+          segmentSource: source,
+        });
+        createdActs.push(act);
+      } else {
+        // Split into multiple acts
+        const splits = this.calculateOptimalSplits(actParagraphs, metrics);
+        const baseLabel = sequence;
 
-        // Each split piece gets its own unique sequence number
-        const actSequence = sequence + j;
-        const finalLabel = `${labelBase}${labelSuffix}`;
+        for (let j = 0; j < splits.length; j++) {
+          const split = splits[j];
+          const label = splits.length === 1 
+            ? String(baseLabel) 
+            : `${baseLabel}${String.fromCharCode(97 + j)}`;
 
-        console.log(
-          `[ActCreation] Creating act ${createdActs.length + 1}: sequence=${actSequence}, label="${finalLabel}", words=${countWords(split)}, splits=${splits.length} (${j + 1}/${splits.length})`,
-        );
-
-        if (finalLabel.length > 10) {
-          throw new Error(
-            `Label exceeds 10 character limit: "${finalLabel}" (${finalLabel.length} chars for sequence ${labelBase}, split ${j + 1}/${splits.length})`,
-          );
-        }
-
-        try {
-          const act = await Act.create({
+          const act = await this.createSingleAct({
             chapterId,
-            sequence: actSequence,
-            label: finalLabel,
-            rawText: split,
-            tokenCount: countWords(split),
+            sequence: sequence++,
+            label,
+            rawText: split.text,
+            tokenCount: split.tokens,
+            unifiedWordCount: split.words,
             segmentSource: source,
-            status: "pending",
           });
 
           createdActs.push(act);
-          splitActIds.push(act.id);
-          console.log(`[ActCreation] ✓ Act created with ID ${act.id}`);
 
-          // Create dependency chain
-          if (createdActs.length > 1) {
-            await ActDependency.create({
-              actId: act.id,
-              dependsOnActId: createdActs[createdActs.length - 2].id,
-              dependencyType: "translation_sequence",
-            });
-          }
-        } catch (dbError) {
-          console.error(
-            `[ActCreation] Database error for label "${finalLabel}":`,
-            dbError.message,
-          );
-          if (dbError.errors && Array.isArray(dbError.errors)) {
-            dbError.errors.forEach((err) => {
-              console.error(`  - ${err.path}: ${err.message}`);
-            });
-          }
-          throw dbError;
-        }
-      }
-
-      // If this boundary was split, link all split pieces together
-      if (splitActIds.length > 1) {
-        for (let j = 1; j < splitActIds.length; j++) {
-          try {
-            await ActDependency.create({
-              actId: splitActIds[j],
-              dependsOnActId: splitActIds[0],
-              dependencyType: "split_from",
-            });
-            console.log(
-              `[ActCreation] Linked split act ${splitActIds[j]} to original ${splitActIds[0]}`,
-            );
-          } catch (depError) {
-            console.warn(
-              `[ActCreation] Warning: Could not create split dependency. This may be due to database schema mismatch. Continuing without link.`,
-              depError.message,
-            );
-            // Don't throw - continue processing other splits
-            // The acts themselves were created successfully
+          // Create translation sequence dependency
+          if (j > 0) {
+            await this.createDependency(createdActs[createdActs.length - 2].id, act.id);
           }
         }
       }
+    }
 
-      // Increment sequence for next boundary by the number of splits
-      sequence += splits.length;
+    // Create inter-act dependencies (sequential translation order)
+    for (let i = 1; i < createdActs.length; i++) {
+      await this.createDependency(createdActs[i - 1].id, createdActs[i].id);
     }
 
     return createdActs;
   }
 
   /**
-   * Splits an act into multiple pieces if it exceeds 50 words.
-   * Calculates how many splits are needed so each piece is under 50 words.
-   * Splits at paragraph boundaries closest to the target word count.
-   * @param {string} actText - Full act text
-   * @param {Array} paragraphs - Paragraph objects with { text } property
-   * @returns {Array} Array of text strings (act pieces)
+   * Calculate optimal split points to balance size
    */
-  splitActByLimit(actText, paragraphs) {
-    const totalWords = countWords(actText);
+  calculateOptimalSplits(paragraphs, metrics) {
+    const totalTokens = metrics.reduce((sum, m) => sum + m.estimatedTokens, 0);
+    const totalWords = metrics.reduce((sum, m) => sum + m.unifiedWords, 0);
 
-    // If under limit, no split needed
-    if (totalWords <= ACT_WORD_LIMIT) {
-      return [actText];
-    }
+    // Determine number of splits needed
+    const tokenSplits = Math.ceil(totalTokens / this.limits.maxTokensPerAct);
+    const wordSplits = Math.ceil(totalWords / this.limits.maxUnifiedWordsPerAct);
+    const numSplits = Math.max(tokenSplits, wordSplits, 1);
 
-    // Calculate how many splits are needed
-    // numSplits is the smallest number where totalWords / numSplits <= ACT_WORD_LIMIT
-    const numSplits = Math.ceil(totalWords / ACT_WORD_LIMIT);
-    const targetWordsPerSplit = Math.ceil(totalWords / numSplits);
+    const targetTokens = totalTokens / numSplits;
+    const targetWords = totalWords / numSplits;
 
-    // Find split indices at paragraph boundaries
-    const splitIndices = this.findSplitIndices(
-      paragraphs,
-      numSplits,
-      targetWordsPerSplit,
-    );
-
-    // Build the splits from indices
     const splits = [];
-    for (let i = 0; i < splitIndices.length - 1; i++) {
-      const startIdx = splitIndices[i];
-      const endIdx = splitIndices[i + 1];
-      const splitParas = paragraphs.slice(startIdx, endIdx);
-      const splitText = splitParas.map((p) => p.text).join("\n\n");
-      if (splitText.trim()) {
-        splits.push(splitText);
+    let currentText = [];
+    let currentTokens = 0;
+    let currentWords = 0;
+    let splitIdx = 0;
+
+    for (let i = 0; i < paragraphs.length; i++) {
+      const para = paragraphs[i];
+      const paraTokens = metrics[i].estimatedTokens;
+      const paraWords = metrics[i].unifiedWords;
+
+      // Check if adding this paragraph would exceed target (and we have content)
+      const wouldExceed = (currentTokens + paraTokens > targetTokens * 1.2) || 
+                         (currentWords + paraWords > targetWords * 1.2);
+
+      const isLastSplit = splitIdx === numSplits - 1;
+      const hasContent = currentText.length > 0;
+
+      if (wouldExceed && hasContent && !isLastSplit) {
+        // Finalize current split
+        splits.push({
+          text: currentText.join('\n\n'),
+          tokens: currentTokens,
+          words: currentWords,
+        });
+
+        // Start new split
+        currentText = [para.text];
+        currentTokens = paraTokens;
+        currentWords = paraWords;
+        splitIdx++;
+      } else {
+        // Add to current split
+        currentText.push(para.text);
+        currentTokens += paraTokens;
+        currentWords += paraWords;
       }
     }
 
-    return splits.length > 0 ? splits : [actText];
+    // Don't forget the last split
+    if (currentText.length > 0) {
+      splits.push({
+        text: currentText.join('\n\n'),
+        tokens: currentTokens,
+        words: currentWords,
+      });
+    }
+
+    return splits;
   }
 
   /**
-   * Finds paragraph indices where splits should occur.
-   * Distributes splits to aim for roughly equal word counts.
-   * @param {Array} paragraphs - Paragraph objects with { text } property
-   * @param {number} numSplits - How many splits to create
-   * @param {number} targetWordsPerSplit - Target words per split
-   * @returns {Array} Array of paragraph indices [0, idx1, idx2, ..., paragraphs.length]
+   * Create a single act record
    */
-  findSplitIndices(paragraphs, numSplits, targetWordsPerSplit) {
-    // Calculate cumulative word counts
-    const cumulativeWords = [];
-    let runningTotal = 0;
-    for (const para of paragraphs) {
-      runningTotal += countWords(para.text);
-      cumulativeWords.push(runningTotal);
+  async createSingleAct(data) {
+    try {
+      const act = await Act.create({
+        chapterId: data.chapterId,
+        sequence: data.sequence,
+        label: data.label,
+        rawText: data.rawText,
+        tokenCount: data.tokenCount,
+        segmentSource: data.segmentSource,
+        status: 'pending',
+      });
+
+      console.log(`[ActCreation] Created act ${data.label} (${data.unifiedWordCount} words, ${data.tokenCount} tokens)`);
+      return act;
+    } catch (error) {
+      console.error(`[ActCreation] Failed to create act ${data.label}:`, error.message);
+      throw error;
     }
+  }
 
-    const totalWords = cumulativeWords[cumulativeWords.length - 1];
-    const splitIndices = [0]; // Always start at 0
-
-    // For each split point, find the paragraph boundary closest to that position
-    for (let splitNum = 1; splitNum < numSplits; splitNum++) {
-      // Calculate the target word position for this split
-      const targetWord = (splitNum / numSplits) * totalWords;
-
-      let closestIdx = 0;
-      let closestDiff = Math.abs(cumulativeWords[0] - targetWord);
-
-      // Find the paragraph index where cumulative words is closest to target
-      for (let j = 1; j < cumulativeWords.length; j++) {
-        const diff = Math.abs(cumulativeWords[j] - targetWord);
-        if (diff < closestDiff) {
-          closestDiff = diff;
-          closestIdx = j;
-        }
-      }
-
-      // We want to split AFTER this paragraph, so add closestIdx + 1
-      const nextSplitIdx = closestIdx + 1;
-
-      // Only add if not duplicate and not already at the end
-      if (
-        !splitIndices.includes(nextSplitIdx) &&
-        nextSplitIdx < paragraphs.length
-      ) {
-        splitIndices.push(nextSplitIdx);
-      }
+  /**
+   * Create dependency between acts
+   */
+  async createDependency(fromActId, toActId) {
+    try {
+      await ActDependency.create({
+        actId: toActId,
+        dependsOnActId: fromActId,
+        dependencyType: 'translation_sequence',
+      });
+    } catch (error) {
+      console.warn(`[ActCreation] Failed to create dependency ${fromActId} -> ${toActId}:`, error.message);
+      // Non-fatal: continue without dependency
     }
+  }
 
-    // Always end at the last paragraph
-    if (splitIndices[splitIndices.length - 1] !== paragraphs.length) {
-      splitIndices.push(paragraphs.length);
-    }
+  /**
+   * Split an act manually (for edit operations)
+   */
+  splitActForEdit(actText, paragraphs) {
+    const metrics = TextMetrics.calculateParagraphMetrics(paragraphs);
+    const totalWords = metrics.reduce((sum, m) => sum + m.unifiedWords, 0);
 
-    // Sort to ensure ascending order
-    return [...new Set(splitIndices)].sort((a, b) => a - b);
+    // Use same limits as automatic segmentation
+    const numSplits = Math.ceil(totalWords / this.limits.maxUnifiedWordsPerAct) || 1;
+
+    return this.calculateOptimalSplits(paragraphs, metrics).map((split, idx) => ({
+      ...split,
+      label: String.fromCharCode(65 + idx), // A, B, C...
+    }));
   }
 }
 
