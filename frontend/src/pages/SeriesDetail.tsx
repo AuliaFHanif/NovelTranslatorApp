@@ -18,6 +18,7 @@ import {
   listChapters,
   updateSeries,
   deleteSeries,
+  deleteChapter,
   type Series,
   type Chapter,
 } from "../lib/api";
@@ -40,6 +41,9 @@ export function SeriesDetail() {
   const [editDescription, setEditDescription] = useState("");
   const [isEditSubmitting, setIsEditSubmitting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [deletingChapterId, setDeletingChapterId] = useState<number | null>(
+    null,
+  );
 
   useEffect(() => {
     async function loadSeries() {
@@ -176,6 +180,36 @@ export function SeriesDetail() {
     }
   }
 
+  async function handleDeleteChapter(chapter: Chapter) {
+    if (!series) {
+      return;
+    }
+
+    const confirmed = await showConfirm(
+      "Delete Chapter",
+      `Delete Chapter ${chapter.number}${chapter.title ? ` — ${chapter.title}` : ""}? This action cannot be undone.`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setDeletingChapterId(chapter.id);
+      await deleteChapter(chapter.id);
+      const chapterData = await listChapters(series.id);
+      setChapters(chapterData);
+      await showSuccess("Success", "Chapter deleted successfully!");
+    } catch (err) {
+      await showError(
+        "Failed to Delete Chapter",
+        err instanceof Error ? err.message : "An unexpected error occurred",
+      );
+    } finally {
+      setDeletingChapterId(null);
+    }
+  }
+
   function formatLanguage(value: Series["language"]): string {
     return value === "zh" ? "中文 — Chinese" : "日本語 — Japanese";
   }
@@ -284,10 +318,13 @@ export function SeriesDetail() {
               {chapters.map((chapter) => (
                 <div
                   key={chapter.id}
-                  className="flex justify-between items-center p-3 rounded-sm border border-[#d8cdbd] hover:bg-[#f2eadc]/20 transition-colors cursor-default"
+                  className="flex items-center gap-3 p-3 rounded-sm border border-[#d8cdbd] hover:bg-[#f2eadc]/20 transition-colors group"
                 >
-                  <div className="flex-1">
-                    <div className="text-sm font-serif text-[#4A3D39]">
+                  <Link
+                    to={`/translation?seriesId=${series.id}&chapterId=${chapter.id}`}
+                    className="flex-1 min-w-0"
+                  >
+                    <div className="text-sm font-serif text-[#4A3D39] group-hover:text-[#8b2626] transition-colors">
                       Chapter {chapter.number}
                       {chapter.title && ` — ${chapter.title}`}
                     </div>
@@ -296,10 +333,31 @@ export function SeriesDetail() {
                       {chapter.finalText &&
                         ` • ${chapter.finalText.length} in translation`}
                     </div>
-                  </div>
+                  </Link>
                   <span className="text-[9px] text-[#a0908b] font-sans ml-4">
                     {formatDate(chapter.createdAt)}
                   </span>
+                  {chapter.finalText && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => navigate(`/series/${series.id}/chapter/${chapter.id}/result`)}
+                      className="h-7 px-3 text-[9px] tracking-widest uppercase font-sans border-[#d8cdbd] text-[#2f7a46] hover:bg-[#ebf5ed] hover:text-[#1a4d2e] bg-transparent rounded-sm transition-all"
+                    >
+                      VIEW RESULT
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={deletingChapterId === chapter.id}
+                    onClick={() => void handleDeleteChapter(chapter)}
+                    className="h-7 px-3 text-[9px] tracking-widest uppercase font-sans border-[#c68080] text-[#c68080] hover:bg-[#ffeaea] hover:text-[#a04040] bg-transparent rounded-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {deletingChapterId === chapter.id
+                      ? "DELETING..."
+                      : "DELETE"}
+                  </Button>
                 </div>
               ))}
             </div>

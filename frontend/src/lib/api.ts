@@ -1,4 +1,26 @@
 export type SourceLanguage = "ja" | "zh";
+export type Scope = "act" | "subact";
+
+export interface PolishEdit {
+  id?: number;
+  original: string;
+  replacement: string;
+  reason: string;
+  applied?: boolean;
+}
+
+export interface Polish {
+  id: number;
+  actId: number;
+  modelUsed: string | null;
+  content: string;
+  editCount: number;
+  appliedCount: number;
+  isActive: boolean;
+  Edits?: PolishEdit[];
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface Series {
   id: number;
@@ -17,6 +39,241 @@ export interface Chapter {
   title: string;
   rawText: string;
   finalText: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type TranslationPassState =
+  | "idle"
+  | "pass1_done"
+  | "pass2_done"
+  | "pass3_done"
+  | "pass4_done";
+
+export interface SubAct {
+  id: number;
+  actId: number;
+  sequence: number;
+  rawText: string;
+  translatedText: string | null;
+  tokenCount: number;
+  charCount: number;
+  Analysis?: {
+    id: number;
+    subActId: number;
+    anatomyProfile: any;
+    scope: "subact";
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Act {
+  id: number;
+  chapterId: number;
+  sequence: number;
+  label: string;
+  rawText: string;
+  anatomyProfile?: {
+    legacyAnalysis?: string;
+    draftTranslation?: string;
+    finalTranslation?: string;
+    linguistic?: any;
+    narrative?: any;
+    segmentGuidance?: Record<string, any>; // New
+    termExtractionStatus?: string;
+    actAnalysisStatus?: string;
+    pass4Edits?: PolishEdit[];
+    pass4Polished?: string;
+  };
+  SubActs?: SubAct[]; // New
+  Analysis?: any; // New
+  pass4Edits?: PolishEdit[];
+  pass4Polished?: string;
+  PolishEdits?: PolishEdit[];
+  Polishes?: Polish[];
+  translatedText: string | null;
+
+  status: string;
+  lastRunAt: string | null;
+  llmMeta: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TranslationChapter extends Chapter {
+  status: string;
+  Series: Pick<Series, "id" | "title" | "language" | "genre">;
+}
+
+export interface TranslationProgress {
+  totalActs: number;
+  pass1Done: number;
+  pass2Done: number;
+  pass3Done: number;
+  pass4Done: number;
+}
+
+export interface GlossaryTerm {
+  id: number;
+  seriesId: number;
+  canonicalForm: string;
+  termJa?: string;
+  termZh?: string;
+  termEn: string;
+  type: string;
+  definition?: string;
+  metadata: Record<string, any>;
+  status: "pending" | "approved" | "rejected";
+  confidence?: number;
+  createdAt: string;
+  updatedAt: string;
+  Appearances?: Array<{
+    contextSentence: string;
+    confidence: number;
+  }>;
+}
+
+export type DetailedGlossaryTerm = GlossaryTerm;
+
+export interface TermAppearance {
+  id: number;
+  termId: number;
+  actId: number;
+  contextSentence: string;
+  confidence: number;
+  extractedAt: string;
+}
+
+export interface GlossaryCandidate {
+  term: string;
+  type: string;
+  proposedTranslation: string;
+  confidence: number;
+  existingId: number | null;
+  appearances: Array<{
+    actId: number;
+    actLabel: string;
+    context: string;
+    confidence: number;
+  }>;
+}
+
+export interface ConflictedTerm extends GlossaryCandidate {
+  existingTranslation: string;
+  existingStatus: string;
+  termEn?: string;
+}
+
+export interface BulkApprovalResult {
+  created: number;
+  updated: number;
+  appearances: number;
+  categorized: {
+    newTerms: GlossaryCandidate[];
+    existingTerms: Omit<ConflictedTerm, "existingTranslation">[];
+    conflictTerms: ConflictedTerm[];
+  };
+  conflictCount: number;
+}
+
+export interface ConflictResolution {
+  existingId: number;
+  term: string;
+  resolution: "keep_existing" | "merge" | "create_variant";
+  termEn: string;
+  variantForm?: string;
+  appearances: Array<{
+    actId: number;
+    context: string;
+    confidence: number;
+  }>;
+}
+
+export interface ConflictResolutionResult {
+  processed: number;
+  kept: number;
+  merged: number;
+  created_variants: number;
+  failed: string[];
+}
+
+export interface AnalysisResult {
+  success: boolean;
+  chapterId: number;
+  processed: number;
+  failed: any[];
+  glossary: {
+    created: number;
+    merged: number;
+    appearances: number;
+  };
+  pendingGlossary: number;
+  terms?: GlossaryCandidate[];
+}
+
+export interface TranslationBootstrapResponse {
+  chapter: TranslationChapter;
+  acts: Act[];
+  progress: TranslationProgress;
+}
+
+export interface TranslationPassResult {
+  act: Act;
+  pass: 1 | 2 | 3 | 4;
+  output: string;
+}
+
+export interface ChapterPassResult {
+  pass: 1 | 2 | 3 | 4;
+  completed: number;
+
+  failed: number;
+  failures: Array<{
+    actId: number;
+    status: number;
+    error: string;
+    message?: string;
+  }>;
+  acts: Act[];
+}
+
+export interface ArchitectResult {
+  success?: boolean;
+  chapterId: number;
+  actsCreated: number;
+  segmentationSource: "ai" | "fallback";
+  pass1Diagnostics?: {
+    paragraphCount: number;
+    boundaryCount: number;
+    lastBoundary: number;
+    coveredParagraphs: number;
+    coveragePercent: number;
+    gapCount: number;
+  };
+  acts: Array<{
+    id: number;
+    label: string;
+    sequence: number;
+    status: string;
+  }>;
+}
+
+export interface Genre {
+  id: number;
+  name: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AIModel {
+  id: number;
+  name: string;
+  modelId: string;
+  provider: "lm-studio" | "openai" | "claude" | "other";
+  description: string | null;
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -148,6 +405,503 @@ export async function deleteSeries(id: number): Promise<void> {
   });
 }
 
+export async function deleteChapter(id: number): Promise<void> {
+  await requestJson<ApiItemResponse<void>>(`/chapters/${id}`, {
+    method: "DELETE",
+  });
+}
+
 export async function getHealthStatus(): Promise<HealthResponse> {
   return requestJson<HealthResponse>("/health");
+}
+
+export async function getTranslationChapter(
+  seriesId: number,
+  chapterId: number,
+): Promise<TranslationBootstrapResponse> {
+  const result = await requestJson<
+    ApiItemResponse<TranslationBootstrapResponse>
+  >(`/translation/translate/${seriesId}/chapter/${chapterId}`);
+  return result.data;
+}
+
+export async function streamActTranslation(
+  actId: number,
+  model: string,
+  onChunk: (text: string) => void,
+): Promise<void> {
+  const url = `${API_BASE_URL}/translation/acts/${actId}/stream?model=${encodeURIComponent(model)}`;
+  const response = await fetch(url, { method: "POST" });
+
+  if (!response.ok) {
+    throw new Error(`Failed to start stream: ${response.statusText}`);
+  }
+
+  const reader = response.body?.getReader();
+  const decoder = new TextDecoder();
+
+  if (!reader) return;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split("\n");
+
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const dataStr = line.slice(6).trim();
+          if (dataStr === "[DONE]") continue;
+
+          try {
+            const data = JSON.parse(dataStr);
+            if (data.content) {
+              onChunk(data.content);
+            }
+          } catch (e) {
+            // Partial chunk or parse error
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export async function getActTranslationPrompt(
+  actId: number,
+  model: string,
+): Promise<{ messages: Array<{ role: string; content: string }> }> {
+  const result = await requestJson<
+    ApiItemResponse<{ messages: Array<{ role: string; content: string }> }>
+  >(`/translation/acts/${actId}/prompt?model=${encodeURIComponent(model)}`);
+  return result.data;
+}
+
+export async function runActPass(
+  actId: number,
+  pass: 1 | 2 | 3 | 4,
+  options?: {
+    force?: boolean;
+    model?: string;
+    temperature?: number;
+    top_p?: number;
+    max_tokens?: number;
+  },
+): Promise<TranslationPassResult> {
+  // Pass 3 is translation, Pass 4 is polish
+  // For now, map to appropriate endpoints
+  if (pass === 3) {
+    // Translation endpoint - currently there's no single act translate endpoint
+    // so we return a placeholder
+    throw new Error("Pass 3 on individual acts not yet implemented");
+  }
+  if (pass === 4) {
+    // Polish endpoint
+    await requestJson<ApiItemResponse<Polish>>(
+      `/translation/polish/act/${actId}`,
+      {
+        method: "POST",
+        body: JSON.stringify(options || {}),
+      },
+    );
+    return {
+      act: {} as Act,
+      pass: 4,
+      output: "Polish completed",
+    };
+  }
+  throw new Error(`Pass ${pass} not supported`);
+}
+
+export async function runChapterPass(
+  chapterId: number,
+  pass: 1 | 2 | 3 | 4,
+  options?: {
+    force?: boolean;
+    model?: string;
+    temperature?: number;
+    top_p?: number;
+    max_tokens?: number;
+  },
+): Promise<ChapterPassResult> {
+  if (pass === 3) {
+    // Pass 3: Translation - translates all SubActs in the chapter
+    const result = await requestJson<any>(
+      `/translation/chapters/${chapterId}/translate`,
+      {
+        method: "POST",
+        body: JSON.stringify(options || {}),
+      },
+    );
+    // Convert response to ChapterPassResult format
+    return {
+      pass: 3,
+      completed: result.completed || 0,
+      failed: result.failed || 0,
+      failures: result.failures || [],
+      acts: [],
+    };
+  }
+
+  if (pass === 4) {
+    // Pass 4: Polish/Export - finalizes acts with polish
+    await requestJson<any>(`/translation/chapters/${chapterId}/export`, {
+      method: "POST",
+      body: JSON.stringify(options || {}),
+    });
+    // Convert response to ChapterPassResult format
+    return {
+      pass: 4,
+      completed: 1,
+      failed: 0,
+      failures: [],
+      acts: [],
+    };
+  }
+
+  throw new Error(`Pass ${pass} not supported for chapters`);
+}
+
+export async function runArchitectPhase(
+  chapterId: number,
+): Promise<ArchitectResult> {
+  const result = await requestJson<ApiItemResponse<ArchitectResult>>(
+    `/chapters/${chapterId}/architect`,
+    {
+      method: "POST",
+    },
+  );
+
+  return result.data;
+}
+
+export async function updateAct(
+  actId: number,
+  rawText: string,
+): Promise<{
+  success: boolean;
+  wasSplit?: boolean;
+  updatedAct?: Act;
+  updatedActs?: Act[];
+  message?: string;
+}> {
+  const result = await requestJson<any>(`/chapters/acts/${actId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ rawText }),
+  });
+
+  return result.data || result;
+}
+
+export async function deleteAct(actId: number): Promise<{
+  success: boolean;
+  message?: string;
+  remainingActCount?: number;
+}> {
+  const result = await requestJson<any>(`/chapters/acts/${actId}`, {
+    method: "DELETE",
+  });
+
+  return result.data || result;
+}
+
+export async function updateSubActTranslation(
+  subActId: number,
+  translatedText: string,
+): Promise<SubAct> {
+  const result = await requestJson<ApiItemResponse<SubAct>>(
+    `/translation/subacts/${subActId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ translatedText }),
+    },
+  );
+
+  return result.data;
+}
+
+export async function updateActTranslation(
+  actId: number,
+  translatedText: string,
+): Promise<Act> {
+  const result = await requestJson<ApiItemResponse<Act>>(
+    `/translation/acts/${actId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ translatedText }),
+    },
+  );
+
+  return result.data;
+}
+
+/**
+ * LEXICOGRAPHER & GLOSSARY API FUNCTIONS
+ */
+
+export async function runChapterAnalysis(
+  chapterId: number,
+  options?: {
+    model?: string;
+    temperature?: number;
+    task?: "all" | "terms" | "narrative";
+  },
+): Promise<AnalysisResult> {
+  const result = await requestJson<ApiItemResponse<AnalysisResult>>(
+    `/chapters/${chapterId}/analyze`,
+    {
+      method: "POST",
+      body: JSON.stringify(options || {}),
+    },
+  );
+  return result.data;
+}
+
+export async function runActAnalysis(
+  actId: number,
+  options?: {
+    model?: string;
+    temperature?: number;
+    task?: "all" | "terms" | "narrative";
+  },
+): Promise<AnalysisResult> {
+  const result = await requestJson<ApiItemResponse<AnalysisResult>>(
+    `/acts/${actId}/analyze`,
+    {
+      method: "POST",
+      body: JSON.stringify(options || {}),
+    },
+  );
+  return result.data;
+}
+
+export async function runActGroupAnalysis(
+  chapterId: number,
+  actIds: number[],
+  options?: {
+    model?: string;
+    temperature?: number;
+    task?: "all" | "terms" | "narrative";
+  },
+): Promise<AnalysisResult> {
+  const result = await requestJson<ApiItemResponse<AnalysisResult>>(
+    `/chapters/${chapterId}/analyze-group`,
+    {
+      method: "POST",
+      body: JSON.stringify({ actIds, ...(options || {}) }),
+    },
+  );
+  return result.data;
+}
+
+export async function getSeriesGlossaryDetailed(
+  seriesId: number,
+): Promise<GlossaryTerm[]> {
+  const result = await requestJson<any>(
+    `/series/${seriesId}/glossary/detailed`,
+  );
+
+  if (Array.isArray(result)) return result;
+
+  // The backend might return { success: true, data: { entries: [...] } }
+  // OR might return a direct list response.
+  const data = result.data || result;
+  return data.entries || (Array.isArray(data) ? data : []);
+}
+
+export async function updateGlossaryTerm(
+  termId: number,
+  payload: {
+    termEn?: string;
+    type?: string;
+    status?: "pending" | "approved" | "rejected";
+    definition?: string;
+  },
+): Promise<GlossaryTerm> {
+  const result = await requestJson<ApiItemResponse<GlossaryTerm>>(
+    `/glossary-terms/${termId}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    },
+  );
+  return result.data;
+}
+
+export async function bulkApproveTerms(
+  seriesId: number,
+  terms: Array<Partial<GlossaryCandidate> & { termEn: string }>,
+): Promise<BulkApprovalResult> {
+  const result = await requestJson<ApiItemResponse<BulkApprovalResult>>(
+    `/series/${seriesId}/glossary/bulk-approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({ terms }),
+    },
+  );
+  return result.data;
+}
+
+export async function resolveTermConflicts(
+  seriesId: number,
+  resolutions: ConflictResolution[],
+): Promise<ConflictResolutionResult> {
+  const result = await requestJson<ApiItemResponse<ConflictResolutionResult>>(
+    `/series/${seriesId}/glossary/resolve-conflicts`,
+    {
+      method: "POST",
+      body: JSON.stringify({ resolutions }),
+    },
+  );
+  return result.data;
+}
+
+export async function deleteAllActs(
+  chapterId: number,
+): Promise<{ deletedCount: number }> {
+  const result = await requestJson<ApiItemResponse<{ deletedCount: number }>>(
+    `/translation/chapters/${chapterId}/acts`,
+    {
+      method: "DELETE",
+    },
+  );
+  return result.data ?? result;
+}
+
+export async function exportChapterResult(chapterId: number): Promise<Chapter> {
+  const result = await requestJson<ApiItemResponse<Chapter>>(
+    `/translation/chapters/${chapterId}/export`,
+    {
+      method: "POST",
+    },
+  );
+  return result.data;
+}
+
+export async function deleteChapterResult(chapterId: number): Promise<void> {
+  await requestJson<ApiItemResponse<void>>(
+    `/translation/chapters/${chapterId}/export`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export async function togglePolishEdit(
+  editId: number,
+  applied: boolean,
+): Promise<PolishEdit> {
+  const result = await requestJson<ApiItemResponse<PolishEdit>>(
+    `/translation/polish-edits/${editId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ applied }),
+    },
+  );
+  return result.data;
+}
+
+/**
+ * GENRE API FUNCTIONS
+ */
+
+export async function listGenres(): Promise<Genre[]> {
+  const result = await requestJson<ApiListResponse<Genre>>("/settings/genres");
+  return result.data;
+}
+
+export async function createGenre(payload: {
+  name: string;
+  description?: string;
+}): Promise<Genre> {
+  const result = await requestJson<ApiItemResponse<Genre>>("/settings/genres", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+  return result.data;
+}
+
+export async function updateGenre(
+  id: number,
+  payload: {
+    name?: string;
+    description?: string;
+  },
+): Promise<Genre> {
+  const result = await requestJson<ApiItemResponse<Genre>>(
+    `/settings/genres/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+
+  return result.data;
+}
+
+export async function deleteGenre(id: number): Promise<void> {
+  await requestJson<ApiItemResponse<void>>(`/settings/genres/${id}`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * AI MODEL API FUNCTIONS
+ */
+
+export async function listAIModels(): Promise<AIModel[]> {
+  const result = await requestJson<ApiListResponse<AIModel>>(
+    "/settings/ai-models",
+  );
+  return result.data;
+}
+
+export async function createAIModel(payload: {
+  name: string;
+  modelId: string;
+  provider?: "lm-studio" | "openai" | "claude" | "other";
+  description?: string;
+  isActive?: boolean;
+}): Promise<AIModel> {
+  const result = await requestJson<ApiItemResponse<AIModel>>(
+    "/settings/ai-models",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+
+  return result.data;
+}
+
+export async function updateAIModel(
+  id: number,
+  payload: {
+    name?: string;
+    modelId?: string;
+    provider?: "lm-studio" | "openai" | "claude" | "other";
+    description?: string;
+    isActive?: boolean;
+  },
+): Promise<AIModel> {
+  const result = await requestJson<ApiItemResponse<AIModel>>(
+    `/settings/ai-models/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+
+  return result.data;
+}
+
+export async function deleteAIModel(id: number): Promise<void> {
+  await requestJson<ApiItemResponse<void>>(`/settings/ai-models/${id}`, {
+    method: "DELETE",
+  });
 }

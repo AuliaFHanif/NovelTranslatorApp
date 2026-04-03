@@ -16,21 +16,38 @@ if (config.use_env_variable) {
   sequelize = new Sequelize(config.database, config.username, config.password, config);
 }
 
-fs
-  .readdirSync(__dirname)
-  .filter(file => {
-    return (
-      file.indexOf('.') !== 0 &&
-      file !== basename &&
-      file.slice(-3) === '.js' &&
-      file.indexOf('.test.js') === -1
-    );
-  })
-  .forEach(file => {
-    const model = require(path.join(__dirname, file))(sequelize, Sequelize.DataTypes);
-    db[model.name] = model;
-  });
+// Import models explicitly for clean schema layout
+const Series = require('./Series')(sequelize, Sequelize.DataTypes);
+const Chapter = require('./Chapter')(sequelize, Sequelize.DataTypes);
+const Act = require('./Act')(sequelize, Sequelize.DataTypes);
+const GlossaryTerm = require('./GlossaryTerm')(sequelize, Sequelize.DataTypes);
+const TermAppearance = require('./TermAppearance')(sequelize, Sequelize.DataTypes);
+const ActDependency = require('./ActDependency')(sequelize, Sequelize.DataTypes);
+const PolishEdit = require('./PolishEdit')(sequelize, Sequelize.DataTypes);
+const Polish = require('./Polish')(sequelize, Sequelize.DataTypes);
+const SubAct = require('./SubAct')(sequelize, Sequelize.DataTypes);
+const Analysis = require('./Analysis')(sequelize, Sequelize.DataTypes);
 
+// Old models that survived the refactor (not directly linked to new core sequence)
+const Genre = require('./genre.js')(sequelize, Sequelize.DataTypes);
+const AIModel = require('./aimodel.js')(sequelize, Sequelize.DataTypes);
+
+// Store in db object
+db.Series = Series;
+db.Chapter = Chapter;
+db.Act = Act;
+db.GlossaryTerm = GlossaryTerm;
+db.TermAppearance = TermAppearance;
+db.ActDependency = ActDependency;
+db.PolishEdit = PolishEdit;
+db.Polish = Polish;
+db.SubAct = SubAct;
+db.Analysis = Analysis;
+
+db.Genre = Genre;
+db.AIModel = AIModel;
+
+// Define associations
 Object.keys(db).forEach(modelName => {
   if (db[modelName].associate) {
     db[modelName].associate(db);

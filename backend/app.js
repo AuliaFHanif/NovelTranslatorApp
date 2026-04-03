@@ -1,9 +1,15 @@
+require("dotenv").config();
+console.log("[dotenv] ✓ Environment variables injected");
+
 const express = require("express");
 const cors = require("cors");
 const { sequelize } = require("./models");
 const chapterRoutes = require("./routes/chapters");
 const seriesRoutes = require("./routes/series");
 const proxyRoutes = require("./routes/proxy");
+const translationRoutes = require("./routes/translation");
+const settingsRoutes = require("./routes/settings");
+const lexicographerRoutes = require("./routes/lexicographer");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -24,6 +30,9 @@ app.use("/api/series", seriesRoutes);
 app.use("/api/chapters", chapterRoutes);
 app.use("/api/llm", proxyRoutes);
 app.use("/api/health", proxyRoutes);
+app.use("/api/translation", translationRoutes);
+app.use("/api/settings", settingsRoutes);
+app.use("/api", lexicographerRoutes);
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -56,6 +65,9 @@ sequelize
       console.log(`  - GET  /api/chapters/:id   (get chapter)`);
       console.log(`  - POST /api/llm            (LM Studio proxy)`);
       console.log(`  - GET  /api/health         (service health)`);
+      console.log(`  - GET  /api/translation/chapters/:chapterId`);
+      console.log(`  - POST /api/translation/acts/:actId/pass`);
+      console.log(`  - POST /api/translation/chapters/:chapterId/pass`);
     });
   })
   .catch((err) => {

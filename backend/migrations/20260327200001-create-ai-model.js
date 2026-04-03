@@ -2,7 +2,7 @@
 /** @type {import('sequelize-cli').Migration} */
 module.exports = {
   async up(queryInterface, Sequelize) {
-    await queryInterface.createTable("Glossaries", {
+    await queryInterface.createTable("AIModels", {
       id: {
         allowNull: false,
         autoIncrement: true,
@@ -10,17 +10,26 @@ module.exports = {
         type: Sequelize.INTEGER,
       },
       name: {
-        type: Sequelize.STRING(255),
+        type: Sequelize.STRING,
         allowNull: false,
-        validate: { notEmpty: { msg: "Glossary name cannot be empty" } },
+        unique: true,
       },
-      type: {
-        type: Sequelize.ENUM("character", "location", "item", "concept"),
+      modelId: {
+        type: Sequelize.STRING,
         allowNull: false,
       },
-      language_notes: {
-        type: Sequelize.JSONB,
+      provider: {
+        type: Sequelize.ENUM("lm-studio", "openai", "claude", "other"),
+        allowNull: false,
+        defaultValue: "lm-studio",
+      },
+      description: {
+        type: Sequelize.TEXT,
         allowNull: true,
+      },
+      isActive: {
+        type: Sequelize.BOOLEAN,
+        defaultValue: true,
       },
       createdAt: {
         allowNull: false,
@@ -33,6 +42,6 @@ module.exports = {
     });
   },
   async down(queryInterface, Sequelize) {
-    await queryInterface.dropTable("Glossaries");
+    await queryInterface.dropTable("AIModels");
   },
 };
