@@ -147,11 +147,6 @@ module.exports = {
         allowNull: false,
         comment: 'Segmented text content from Phase 2'
       },
-      translation: {
-        type: Sequelize.TEXT,
-        allowNull: true,
-        comment: 'Phase 5: Final translation output'
-      },
       tokenCount: {
         type: Sequelize.INTEGER,
         allowNull: false,
@@ -235,7 +230,7 @@ module.exports = {
         comment: 'English translation (REQUIRED)'
       },
       type: {
-        type: Sequelize.ENUM('character', 'location', 'item', 'concept', 'technique'),
+        type: Sequelize.ENUM('character', 'organization', 'location', 'item', 'concept', 'technique'),
         allowNull: false,
         comment: 'Category of the term'
       },

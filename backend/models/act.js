@@ -12,13 +12,36 @@ module.exports = (sequelize, DataTypes) => {
         });
       }
 
-      // Many-to-many: Act <-> GlossaryTerm via TermAppearance
+      // One-to-many: Act has many SubActs
+      if (models.SubAct) {
+        Act.hasMany(models.SubAct, {
+          foreignKey: 'actId',
+          as: 'SubActs',
+          onDelete: 'CASCADE'
+        });
+      }
+
+      // One-to-one: Act has one Analysis
+      if (models.Analysis) {
+        Act.hasOne(models.Analysis, {
+          foreignKey: 'actId',
+          as: 'Analysis',
+          onDelete: 'CASCADE'
+        });
+      }
+
+      // Many-to-many: Act <-> GlossaryTerm via TermAppearance (legacy/reference)
       if (models.GlossaryTerm && models.TermAppearance) {
         Act.belongsToMany(models.GlossaryTerm, {
           through: models.TermAppearance,
           foreignKey: 'actId',
           otherKey: 'termId',
-          as: 'Terms'
+          as: 'GlossaryTerms'
+        });
+
+        Act.hasMany(models.TermAppearance, {
+          foreignKey: 'actId',
+          as: 'Appearances'
         });
       }
 
@@ -45,7 +68,17 @@ module.exports = (sequelize, DataTypes) => {
           otherKey: 'actId'
         });
       }
+
+      // One-to-many: Act has many Polishes
+      if (models.Polish) {
+        Act.hasMany(models.Polish, {
+          foreignKey: 'actId',
+          as: 'Polishes',
+          onDelete: 'CASCADE'
+        });
+      }
     }
+
 
     // Get previous act in sequence (simple!)
     async getPrevious() {
@@ -65,12 +98,6 @@ module.exports = (sequelize, DataTypes) => {
           sequence: this.sequence + 1
         }
       });
-    }
-
-    // Get all glossary terms for this act with appearance data
-    async getTermsWithContext() {
-      const terms = await this.getTerms();
-      return terms;
     }
 
     // Check if this act can be translated (all dependencies ready)
@@ -109,17 +136,23 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.TEXT,
       allowNull: false
     },
-    translation: DataTypes.TEXT,
     tokenCount: {
+      type: DataTypes.INTEGER,
+      defaultValue: 0
+    },
+    segmentationDepth: {
       type: DataTypes.INTEGER,
       defaultValue: 0
     },
     segmentSource: DataTypes.ENUM('ai', 'fallback', 'manual'),
     status: {
-      type: DataTypes.ENUM('pending', 'processing', 'ready', 'complete'),
+      type: DataTypes.ENUM('pending', 'processing', 'segmented', 'analyzed', 'translating', 'complete', 'error'),
       defaultValue: 'pending'
     },
-    anatomyProfile: DataTypes.JSONB
+    translatedText: {
+      type: DataTypes.TEXT,
+      comment: 'Aggregated translation from SubActs'
+    }
   }, {
     sequelize,
     modelName: 'Act',

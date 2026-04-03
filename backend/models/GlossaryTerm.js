@@ -17,6 +17,11 @@ module.exports = (sequelize, DataTypes) => {
           through: models.TermAppearance,
           foreignKey: 'termId',
           otherKey: 'actId',
+          as: 'AssociatedActs'
+        });
+
+        GlossaryTerm.hasMany(models.TermAppearance, {
+          foreignKey: 'termId',
           as: 'Appearances'
         });
       }
@@ -83,7 +88,7 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false
     },
     type: {
-      type: DataTypes.ENUM('character', 'location', 'item', 'concept', 'technique'),
+      type: DataTypes.ENUM('character', 'organization', 'location', 'item', 'concept', 'technique'),
       allowNull: false
     },
     definition: DataTypes.TEXT,

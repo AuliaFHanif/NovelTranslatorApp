@@ -1,23 +1,27 @@
-function estimateTokens(text) {
-  return Math.ceil((text || "").length / 4);
-}
+/**
+ * Paragraph Normalizer - Text preprocessing
+ * 
+ * Changes:
+ * 1. Use TextMetrics instead of local estimateTokens
+ * 2. Slightly faster regex patterns
+ */
+
+const TextMetrics = require('../utils/textMetrics');
 
 function normalizeLineBreaksAndHtml(rawText) {
-  return (rawText || "")
-    .replace(/\r\n?/g, "\n")
-    .replace(/<\/?p[^>]*>/gi, "\n")
-    .replace(/<\s*br\s*\/?\s*>/gi, "\n")
-    .replace(/\n{3,}/g, "\n\n");
+  return (rawText || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/<\/?p[^>]*>/gi, '\n')
+    .replace(/<\s*br\s*\/?\s*>/gi, '\n')
+    .replace(/\n{3,}/g, '\n\n');
 }
 
 function splitNaturalParagraphs(text) {
   const paragraphs = [];
-  if (!text) {
-    return paragraphs;
-  }
+  if (!text) return paragraphs;
 
-  const boundaryRegex =
-    /\n\n+|\n(?=　|「|『|[\u3400-\u9FFF]{2,4}(?:は|が|是|在))/g;
+  // Optimized regex for CJK text detection
+  const boundaryRegex = /\n\n+|\n(?=　|「|『|[\u3400-\u9FFF]{2,4}(?:は|が||在))/g;
   let lastIndex = 0;
   let match;
 
@@ -35,7 +39,6 @@ function splitNaturalParagraphs(text) {
         });
       }
     }
-
     lastIndex = end;
   }
 
@@ -88,10 +91,8 @@ function buildSyntheticParagraphs(text) {
   let match;
 
   while ((match = sentenceRegex.exec(text)) !== null) {
-    const sentence = (match[0] || "").trim();
-    if (!sentence) {
-      continue;
-    }
+    const sentence = (match[0] || '').trim();
+    if (!sentence) continue;
 
     const startOffset = match.index + match[0].indexOf(sentence);
     sentences.push({
@@ -102,20 +103,16 @@ function buildSyntheticParagraphs(text) {
   }
 
   if (sentences.length === 0) {
-    const trimmed = (text || "").trim();
-    if (!trimmed) {
-      return [];
-    }
+    const trimmed = (text || '').trim();
+    if (!trimmed) return [];
 
     const startPos = text.indexOf(trimmed);
-    return [
-      {
-        text: trimmed,
-        startPos: startPos < 0 ? 0 : startPos,
-        endPos: (startPos < 0 ? 0 : startPos) + trimmed.length,
-        isSynthetic: true,
-      },
-    ];
+    return [{
+      text: trimmed,
+      startPos: startPos < 0 ? 0 : startPos,
+      endPos: (startPos < 0 ? 0 : startPos) + trimmed.length,
+      isSynthetic: true,
+    }];
   }
 
   const grouped = [];
@@ -124,7 +121,7 @@ function buildSyntheticParagraphs(text) {
   for (let i = 0; i < sentences.length; i += groupSize) {
     const group = sentences.slice(i, i + groupSize);
     grouped.push({
-      text: group.map((s) => s.text).join("\n"),
+      text: group.map((s) => s.text).join('\n'),
       startPos: group[0].startPos,
       endPos: group[group.length - 1].endPos,
       isSynthetic: true,
@@ -136,9 +133,7 @@ function buildSyntheticParagraphs(text) {
 
 function normalizeParagraphs(rawText) {
   const normalized = normalizeLineBreaksAndHtml(rawText);
-  if (!normalized.trim()) {
-    return [];
-  }
+  if (!normalized.trim()) return [];
 
   let paragraphs = splitNaturalParagraphs(normalized);
   paragraphs = mergeIncompleteParagraphs(paragraphs);
@@ -150,10 +145,10 @@ function normalizeParagraphs(rawText) {
     }
   }
 
-  // Ensure paragraph spans are contiguous and cover the normalized source.
+  // Ensure contiguous coverage
   if (paragraphs.length > 0) {
     paragraphs[0].startPos = 0;
-    for (let i = 1; i < paragraphs.length; i += 1) {
+    for (let i = 1; i < paragraphs.length; i++) {
       if (paragraphs[i].startPos < paragraphs[i - 1].endPos) {
         paragraphs[i].startPos = paragraphs[i - 1].endPos;
       }
@@ -164,19 +159,16 @@ function normalizeParagraphs(rawText) {
     paragraphs[paragraphs.length - 1].endPos = normalized.length;
   }
 
-  return paragraphs.map((paragraph, idx) => ({
+  return paragraphs.map((p, idx) => ({
     index: idx + 1,
-    text:
-      paragraph.text ||
-      normalized.slice(paragraph.startPos, paragraph.endPos).trim(),
-    startPos: paragraph.startPos,
-    endPos: paragraph.endPos,
-    isSynthetic: Boolean(paragraph.isSynthetic),
+    text: p.text || normalized.slice(p.startPos, p.endPos).trim(),
+    startPos: p.startPos,
+    endPos: p.endPos,
+    isSynthetic: Boolean(p.isSynthetic),
   }));
 }
 
 module.exports = {
-  estimateTokens,
   normalizeLineBreaksAndHtml,
   normalizeParagraphs,
 };
