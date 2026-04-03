@@ -47,6 +47,26 @@ class TextMetrics {
   }
 
   /**
+   * Count units based on language (chars for CJK, words for English)
+   */
+  static countUnits(text, language = 'zh') {
+    if (language === 'zh' || language === 'ja') {
+      return this.countCjkChars(text);
+    }
+    return this.countWords(text);
+  }
+
+  /**
+   * Get segmentation limit based on language
+   */
+  static getSegmentationLimit(language = 'zh') {
+    if (language === 'zh' || language === 'ja') {
+      return 2000; // 2000 characters
+    }
+    return 2000; // 2000 words
+  }
+
+  /**
    * Calculate metrics for an array of paragraphs
    */
   static calculateParagraphMetrics(paragraphs) {

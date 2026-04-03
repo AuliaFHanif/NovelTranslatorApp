@@ -17,6 +17,13 @@ module.exports = (sequelize, DataTypes) => {
           as: 'Act'
         });
       }
+
+      if (models.SubAct) {
+        TermAppearance.belongsTo(models.SubAct, { 
+          foreignKey: 'subActId',
+          as: 'SubAct'
+        });
+      }
     }
   }
 
@@ -27,35 +34,56 @@ module.exports = (sequelize, DataTypes) => {
       references: {
         model: 'GlossaryTerms',
         key: 'id'
-      }
+      },
+      onDelete: 'CASCADE'
     },
     actId: {
       type: DataTypes.INTEGER,
-      allowNull: false,
+      allowNull: true,
       references: {
         model: 'Acts',
         key: 'id'
-      }
+      },
+      onDelete: 'CASCADE'
     },
-    contextSentence: DataTypes.TEXT,
-    contextPosition: DataTypes.INTEGER,
-    extractedAt: {
-      type: DataTypes.DATE,
-      defaultValue: DataTypes.NOW
+    subActId: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: {
+        model: 'SubActs',
+        key: 'id'
+      },
+      onDelete: 'CASCADE'
+    },
+    contextSnippet: {
+      type: DataTypes.TEXT,
+      allowNull: true
     },
     confidence: {
       type: DataTypes.FLOAT,
-      defaultValue: 0
+      defaultValue: 1.0
+    },
+    frequency: {
+      type: DataTypes.INTEGER,
+      defaultValue: 1
     }
   }, {
     sequelize,
     modelName: 'TermAppearance',
     tableName: 'TermAppearances',
-    timestamps: false,  // No updatedAt needed
+    timestamps: true,
+    validate: {
+      eitherActOrSubAct() {
+        if (!this.actId && !this.subActId) {
+          throw new Error('Either actId or subActId must be set');
+        }
+      }
+    },
     indexes: [
-      { unique: true, fields: ['termId', 'actId'] },
+      { unique: true, fields: ['termId', 'actId', 'subActId'] },
       { fields: ['termId'] },
-      { fields: ['actId'] }
+      { fields: ['actId'] },
+      { fields: ['subActId'] }
     ]
   });
 

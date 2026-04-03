@@ -25,6 +25,8 @@ const TermAppearance = require('./TermAppearance')(sequelize, Sequelize.DataType
 const ActDependency = require('./ActDependency')(sequelize, Sequelize.DataTypes);
 const PolishEdit = require('./PolishEdit')(sequelize, Sequelize.DataTypes);
 const Polish = require('./Polish')(sequelize, Sequelize.DataTypes);
+const SubAct = require('./SubAct')(sequelize, Sequelize.DataTypes);
+const Analysis = require('./Analysis')(sequelize, Sequelize.DataTypes);
 
 // Old models that survived the refactor (not directly linked to new core sequence)
 const Genre = require('./genre.js')(sequelize, Sequelize.DataTypes);
@@ -39,6 +41,8 @@ db.TermAppearance = TermAppearance;
 db.ActDependency = ActDependency;
 db.PolishEdit = PolishEdit;
 db.Polish = Polish;
+db.SubAct = SubAct;
+db.Analysis = Analysis;
 
 db.Genre = Genre;
 db.AIModel = AIModel;

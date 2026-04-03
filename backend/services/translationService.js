@@ -1,10 +1,12 @@
 const {
   Act,
+  SubAct,
   Chapter,
   Series,
   GlossaryTerm,
   PolishEdit,
   Polish,
+  Analysis,
 } = require("../models");
 const { Op } = require("sequelize");
 const { resolveModel } = require("./resolveModel");
@@ -42,7 +44,9 @@ class TranslationService {
     const userParts = [`Source language: ${languageName}`];
 
     if (glossaryText) {
-      userParts.push(`Glossary (use these translations for names/terms):\n${glossaryText}`);
+      userParts.push(
+        `Glossary (use these translations for names/terms):\n${glossaryText}`,
+      );
     }
 
     if (analysisContext) {
@@ -59,13 +63,14 @@ ONOMATOPOEIA RULES:
       "Task: Translate the following text into natural, faithful English. Preserve character voice, narrative tone, cultural nuance, and proper names. Return only the translated text.",
       onomatopoeiaRules,
       "Source text:",
-      rawActText
+      rawActText,
     );
 
     return [
       {
         role: "system",
-        content: "You are an expert literary translator specializing in translating web novels. Produce faithful, natural English translations that preserve the author's voice, tone, and style.",
+        content:
+          "You are an expert literary translator specializing in translating web novels. Produce faithful, natural English translations that preserve the author's voice, tone, and style.",
       },
       {
         role: "user",
@@ -100,7 +105,8 @@ ONOMATOPOEIA RULES:
     return [
       {
         role: "system",
-        content: "You are an expert literary editor. Refine translations into natural, high-quality literary English while strictly preserving the author's voice and intent.",
+        content:
+          "You are an expert literary editor. Refine translations into natural, high-quality literary English while strictly preserving the author's voice and intent.",
       },
       {
         role: "user",
@@ -118,7 +124,8 @@ ONOMATOPOEIA RULES:
     const termField = language === "ja" ? "termJa" : "termZh";
     return entries
       .map((entry) => {
-        const sourceTerm = entry[termField] || entry.canonicalForm || "(no source term)";
+        const sourceTerm =
+          entry[termField] || entry.canonicalForm || "(no source term)";
         const englishTerm = entry.termEn || "(no English term)";
         const typePrefix = entry.type ? `[${entry.type.toUpperCase()}] ` : "";
         const definition = entry.definition ? ` - ${entry.definition}` : "";
@@ -161,62 +168,81 @@ ONOMATOPOEIA RULES:
   }
 
   /**
-   * Prepare the messages and model configuration for an act translation/polish pass
+   * Prepare context for a SubAct translation
    */
-  async prepareActTranslationContext(act, model, pass) {
-    const chapter = await Chapter.findByPk(act.chapterId, {
-      include: [{ model: Series, as: "Series", attributes: ["id", "language", "title"] }],
+  async prepareSubActTranslationContext(subActId, model) {
+    const smartInjectionService = require("./smartInjectionService");
+
+    const subAct = await SubAct.findByPk(subActId, {
+      include: [
+        {
+          model: Act,
+          as: "Act",
+          include: [
+            {
+              model: Chapter,
+              as: "Chapter",
+              include: [{ model: Series, as: "Series" }],
+            },
+            {
+              model: Analysis,
+              as: "Analysis",
+            },
+          ],
+        },
+      ],
     });
 
-    if (!chapter) throw new Error(`Chapter ${act.chapterId} not found`);
+    if (!subAct) throw new Error(`SubAct ${subActId} not found`);
 
-    const glossaryEntries = await this.collectGlossaryForAct(chapter, act);
-    const glossaryText = this.formatGlossary(glossaryEntries, chapter.Series.language);
+    const act = subAct.Act;
+    const series = act.Chapter.Series;
 
-    let analysisContext = `Current Position: Chapter ${chapter.number} | Act ${act.sequence} - ${act.label}`;
-    const linguistic = act.anatomyProfile?.linguistic;
-    const narrative = act.anatomyProfile?.narrative;
+    // 1. Get smart terms for this SubAct
+    const termsData = await smartInjectionService.getTermsForSubAct(
+      subAct.id,
+      series.id,
+    );
+    const glossaryText = smartInjectionService.buildGlossaryPrompt(termsData);
 
-    if (linguistic || narrative) {
-      const parts = [];
-      if (narrative?.primaryEmotion) parts.push(`Primary emotion: ${narrative.primaryEmotion}`);
-      if (narrative?.emotionalIntensity) parts.push(`Emotional intensity: ${narrative.emotionalIntensity}`);
-      if (narrative?.pacingPattern) parts.push(`Pacing: ${narrative.pacingPattern}`);
-      if (linguistic?.sentenceStructure) parts.push(`Sentence structure: ${linguistic.sentenceStructure}`);
-      
-      if (linguistic?.topicProminence?.frequency !== undefined) {
-        const freq = linguistic.topicProminence.frequency;
-        if (freq > 0) {
-          parts.push(`Topic prominence frequency: ${(freq * 100).toFixed(0)}% — preserve subject-drop and topic-fronting constructions.`);
-        }
-      }
-      
-      if (linguistic?.honorifics?.density) parts.push(`Honorific density: ${linguistic.honorifics.density}`);
-      if (linguistic?.onomatopoeia?.density) parts.push(`Onomatopoeia density: ${linguistic.onomatopoeia.density}`);
-      if (narrative?.emotionalTone?.enryo) parts.push("Enryo present");
-      if (narrative?.emotionalTone?.amae) parts.push("Amae present");
-      
-      if (parts.length > 0) analysisContext += "\n\n" + parts.join("\n");
-    }
+    console.log(
+      `[Translation] SubAct ${subAct.id}: Found ${termsData.injected.length} terms, glossary length: ${glossaryText.length} chars`,
+    );
 
-    const messages = pass !== 4
-      ? this.buildTranslationPrompt({
-          language: chapter.Series.language,
-          rawActText: act.rawText || "",
-          glossaryText,
-          analysisContext,
-        })
-      : this.buildPolishPrompt({
-          language: chapter.Series.language,
-          rawActText: act.rawText || "",
-          initialTranslation: act.anatomyProfile?.finalTranslation || "",
-          analysisContext,
-        });
+    // 2. Get comprehensive Act-level analysis context
+    console.log(
+      `[Translation] Act Analysis present: ${!!act.Analysis}, has anatomyProfile: ${!!act.Analysis?.anatomyProfile}`,
+    );
+    let analysisContext = smartInjectionService.buildAnalysisContext(act);
+
+    // Add segment position info
+    analysisContext =
+      `Current Position: Chapter ${act.Chapter.number} | Act ${act.label} | Segment ${subAct.sequence}\n` +
+      analysisContext;
+
+    // Add segment-specific guidance if available
+    const segmentGuidance =
+      act.Analysis?.anatomyProfile?.segmentGuidance?.[
+        String(subAct.sequence)
+      ] || {};
+
+    if (segmentGuidance.tone)
+      analysisContext += `Segment Tone: ${segmentGuidance.tone}\n`;
+    if (segmentGuidance.pacing)
+      analysisContext += `Segment Pacing: ${segmentGuidance.pacing}\n`;
+    if (segmentGuidance.focus)
+      analysisContext += `Segment Focus: ${segmentGuidance.focus}\n`;
+
+    const messages = this.buildTranslationPrompt({
+      language: series.language,
+      rawActText: subAct.rawText,
+      glossaryText,
+      analysisContext,
+    });
 
     const resolvedModel = await resolveModel(model);
-    const responseFormat = pass === 4 ? polishSchema : null;
 
-    return { messages, resolvedModel, chapter, responseFormat };
+    return { messages, resolvedModel, subAct };
   }
 
   /**
@@ -224,7 +250,9 @@ ONOMATOPOEIA RULES:
    */
   stripThinking(text) {
     if (!text) return "";
-    let cleaned = text.replace(/(?:<think>|Thinking Process:)[\s\S]*?<\/think>/g, "").trim();
+    let cleaned = text
+      .replace(/(?:<think>|Thinking Process:)[\s\S]*?<\/think>/g, "")
+      .trim();
     if (cleaned.includes("</think>")) {
       cleaned = cleaned.split("</think>").pop().trim();
     }
@@ -244,32 +272,42 @@ ONOMATOPOEIA RULES:
           as: "Polishes",
           where: { isActive: true },
           required: false,
-          include: [{ model: PolishEdit, as: "Edits", where: { applied: true }, required: false }],
+          include: [
+            {
+              model: PolishEdit,
+              as: "Edits",
+              where: { applied: true },
+              required: false,
+            },
+          ],
         },
       ],
     });
 
-    const cleanedTexts = acts.map((act) => {
-      const activePolish = act.Polishes?.[0];
-      const appliedEdits = activePolish?.Edits || [];
-      
-      // SOURCE OF TRUTH: Always start from the base Pass 3 translation
-      let text = act.anatomyProfile?.finalTranslation || act.translatedText || "";
+    const cleanedTexts = acts
+      .map((act) => {
+        const activePolish = act.Polishes?.[0];
+        const appliedEdits = activePolish?.Edits || [];
 
-      if (activePolish && text) {
-        let patchedText = text;
-        // APPLY ONLY USER-APPROVED EDITS:
-        for (const edit of appliedEdits) {
-          if (edit.original && edit.replacement && edit.applied) {
-            const regex = new RegExp(this.escapeRegExp(edit.original), "g");
-            patchedText = patchedText.replace(regex, edit.replacement);
+        // SOURCE OF TRUTH: Always start from the base Pass 3 translation
+        let text =
+          act.anatomyProfile?.finalTranslation || act.translatedText || "";
+
+        if (activePolish && text) {
+          let patchedText = text;
+          // APPLY ONLY USER-APPROVED EDITS:
+          for (const edit of appliedEdits) {
+            if (edit.original && edit.replacement && edit.applied) {
+              const regex = new RegExp(this.escapeRegExp(edit.original), "g");
+              patchedText = patchedText.replace(regex, edit.replacement);
+            }
           }
+          text = patchedText;
         }
-        text = patchedText;
-      }
 
-      return this.stripThinking(text);
-    }).filter(Boolean);
+        return this.stripThinking(text);
+      })
+      .filter(Boolean);
 
     const finalText = cleanedTexts.join("\n\n");
     const chapter = await Chapter.findByPk(chapterId);
@@ -295,7 +333,8 @@ ONOMATOPOEIA RULES:
     const edits = parsed.edits || [];
 
     // Base text to match against (Pass 3)
-    const baseText = act.anatomyProfile?.finalTranslation || act.translatedText || "";
+    const baseText =
+      act.anatomyProfile?.finalTranslation || act.translatedText || "";
     const appliedEdits = [];
 
     // Analyze which edits CAN be applied, but do not overwrite the main text yet
@@ -316,11 +355,11 @@ ONOMATOPOEIA RULES:
       }
     }
 
-    // Do NOT overwrite act.translatedText here. 
+    // Do NOT overwrite act.translatedText here.
     // It remains the Pass 3 version until we export.
     act.anatomyProfile = {
       ...profile,
-      pass4Polished: content, 
+      pass4Polished: content,
       pass4Edits: appliedEdits,
       pass4AppliedCount: appliedEdits.filter((e) => e.applied).length,
       pass4TotalCount: appliedEdits.length,
@@ -337,66 +376,62 @@ ONOMATOPOEIA RULES:
       isActive: true,
     });
 
-    await PolishEdit.bulkCreate(appliedEdits.map((edit) => ({
-      actId: act.id,
-      polishId: newPolish.id,
-      original: edit.original,
-      replacement: edit.replacement,
-      reason: edit.reason,
-      applied: edit.applied,
-      modelUsed: resolvedModel,
-    })));
-    
+    await PolishEdit.bulkCreate(
+      appliedEdits.map((edit) => ({
+        actId: act.id,
+        polishId: newPolish.id,
+        original: edit.original,
+        replacement: edit.replacement,
+        reason: edit.reason,
+        applied: edit.applied,
+        modelUsed: resolvedModel,
+      })),
+    );
+
     return patchedText;
   }
 
   /**
-   * Run a pass on a single act
+   * Run translation on a single SubAct
    */
-  async runPassOnAct({ act, pass, force, model, temperature, top_p, max_tokens }) {
-    const readiness = this.canRunPass(act, pass, force);
-    if (!readiness.ok) throw new Error(readiness.reason);
+  async runTranslationOnSubAct({
+    subActId,
+    model,
+    temperature,
+    top_p,
+    max_tokens,
+  }) {
+    const { messages, resolvedModel, subAct } =
+      await this.prepareSubActTranslationContext(subActId, model);
 
-    const { messages, resolvedModel, chapter, responseFormat } = 
-      await this.prepareActTranslationContext(act, model, pass);
+    // Log the exact message being sent to LLM
+    console.log(
+      `[Translation] Sending to LLM - User message (first 1000 chars):\n${messages[1].content.substring(0, 1000)}`,
+    );
 
     const payload = {
       model: resolvedModel,
       messages,
-      temperature: temperature ?? 0.4,
-      top_p: top_p ?? 0.9,
-      max_tokens: max_tokens ?? 16384,
+      temperature: temperature ?? 0.3,
+      top_p: top_p ?? 0.95,
+      max_tokens: max_tokens ?? 12000,
     };
-
-    if (responseFormat) payload.response_format = responseFormat;
 
     const content = await llmClient.chatCompletion(payload);
     if (!content) throw new Error("No content returned from LLM");
 
-    if (pass === 4) {
-      await this.processPolishResults(act, content, resolvedModel);
-    } else {
-      act.anatomyProfile = { ...(act.anatomyProfile || {}), finalTranslation: content };
-      act.translatedText = content;
-    }
+    const cleanedTranslation = this.stripThinking(content);
 
-    act.status = "ready";
-    act.lastRunAt = new Date();
-    act.llmMeta = {
-      ...(act.llmMeta || {}),
-      [`pass${pass}`]: {
-        model: resolvedModel,
-        temperature: payload.temperature,
-        top_p: payload.top_p,
-        max_tokens: payload.max_tokens,
-        ranAt: new Date().toISOString(),
-      },
-    };
+    await subAct.update({
+      translatedText: cleanedTranslation,
+      // Metadata/stats can be added to a JSON field if needed
+    });
 
-    await act.save();
-    await Chapter.update({ status: "ready" }, { where: { id: act.chapterId } });
+    console.log(
+      `[Translation] Completed SubAct ${subActId} using ${resolvedModel}`,
+    );
 
-    return { act, pass, output: content };
+    return { subAct, translation: cleanedTranslation };
   }
 }
 

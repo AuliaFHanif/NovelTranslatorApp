@@ -32,7 +32,8 @@ import {
   deleteAct,
   deleteAllActs,
   exportChapterResult,
-  togglePolishEdit,
+  updateSubActTranslation,
+  updateActTranslation,
   type Act,
   type AIModel,
   type TranslationChapter,
@@ -48,6 +49,7 @@ import { Badge } from "../components/ui/badge";
 import { GlossaryApprovalDialog } from "../components/GlossaryApprovalDialog";
 import { PromptViewerDialog } from "../components/PromptViewerDialog";
 import { ActAnalysisCard } from "../components/ActAnalysisCard";
+import { PolishSelector } from "../components/PolishSelector";
 
 export function Translation() {
   const [searchParams] = useSearchParams();
@@ -72,29 +74,58 @@ export function Translation() {
     content: string;
   }> | null>(null);
   const [isFetchingPrompt, setIsFetchingPrompt] = useState(false);
-  // Map from PolishEdit id -> applied (checkbox state)
-  const [polishEditChecked, setPolishEditChecked] = useState<
-    Record<number, boolean>
-  >({});
   // Act edit mode state
   const [isEditingAct, setIsEditingAct] = useState(false);
   const [editActText, setEditActText] = useState("");
   const [isActMetadataLoading, setIsActMetadataLoading] = useState(false);
 
+  // Polish UI state
+  const [actPolishes, setActPolishes] = useState<
+    Array<{
+      id: number;
+      reason: string;
+      isSelected: boolean;
+    }>
+  >([]);
+  const [isGeneratingPolish, setIsGeneratingPolish] = useState(false);
+
   const seriesId = Number(searchParams.get("seriesId") || "0");
   const chapterId = Number(searchParams.get("chapterId") || "0");
 
-  const selectedAct = useMemo(
-    () => acts.find((act) => act.id === selectedActId) || null,
-    [acts, selectedActId],
-  );
+  const selectedAct = useMemo(() => {
+    // First, check if it's an Act ID
+    const act = acts.find((act) => act.id === selectedActId);
+    if (act) return act;
+
+    // Then, check if it's a SubAct ID
+    for (const act of acts) {
+      if (act.SubActs) {
+        for (const subAct of act.SubActs) {
+          if (subAct.id === selectedActId) {
+            // Return subAct as act-like object for compatibility
+            // Include parent Act's Analysis so we can display it
+            return {
+              ...subAct,
+              // Add act fields for compatibility
+              sequence: `${act.sequence}.${subAct.sequence}`,
+              label: `Act ${act.sequence} - SubAct ${subAct.sequence}`,
+              // Include parent Act's Analysis for panel display
+              Analysis: act.Analysis,
+            } as any;
+          }
+        }
+      }
+    }
+    return null;
+  }, [acts, selectedActId]);
 
   const progress = useMemo(
     () => ({
       total: acts.length,
       pass1Done: acts.length, // If acts exist, Architect is done
-      pass2Done: acts.filter((act) => Boolean(act.anatomyProfile?.linguistic))
-        .length,
+      pass2Done: acts.filter((act) =>
+        Boolean(act.Analysis?.anatomyProfile?.linguistic),
+      ).length,
       pass3Done: acts.filter((act) =>
         Boolean(act.anatomyProfile?.finalTranslation),
       ).length,
@@ -143,15 +174,6 @@ export function Translation() {
         selectedAct?.anatomyProfile?.draftTranslation ||
         "",
     );
-    // Sync checkbox state from DB applied field
-    const edits = selectedAct?.Polishes?.[0]?.Edits ?? [];
-    const initial: Record<number, boolean> = {};
-    for (const edit of edits) {
-      if (edit.id !== undefined) {
-        initial[edit.id] = edit.applied !== false;
-      }
-    }
-    setPolishEditChecked(initial);
   }, [selectedAct]);
 
   async function loadTranslationChapter() {
@@ -171,15 +193,22 @@ export function Translation() {
     try {
       setIsLoadingChapter(true);
       const response = await getTranslationChapter(seriesId, chapterId);
+
+      if (!response) {
+        throw new Error("No response from server");
+      }
+
       setChapter(response.chapter);
-      setActs(response.acts);
+      const actsArr = response.acts || [];
+      setActs(actsArr);
+
       setSelectedActId((current) => {
         if (!current) {
-          return response.acts[0]?.id ?? null;
+          return actsArr[0]?.id ?? null;
         }
 
-        const stillExists = response.acts.some((act) => act.id === current);
-        return stillExists ? current : (response.acts[0]?.id ?? null);
+        const stillExists = actsArr.some((act) => act.id === current);
+        return stillExists ? current : (actsArr[0]?.id ?? null);
       });
     } catch (error) {
       await showError(
@@ -219,8 +248,19 @@ export function Translation() {
       setIsRunningPass(true);
       setEditableTranslation(""); // Clear before streaming
 
-      const url = `${API_BASE_URL}/translation/acts/${selectedAct.id}/stream?model=${encodeURIComponent(modelName)}&pass=${pass}`;
-      const response = await fetch(url);
+      // If selected item is a SubAct, use that directly; otherwise use Act's SubActs
+      let url: string;
+      const isSubAct = selectedAct.actId !== undefined;
+
+      if (isSubAct) {
+        // Translate only this specific SubAct
+        url = `${API_BASE_URL}/translation/subacts/${selectedAct.id}/stream?model=${encodeURIComponent(modelName)}&pass=${pass}`;
+      } else {
+        // Translate all SubActs of this Act
+        url = `${API_BASE_URL}/translation/acts/${selectedAct.id}/stream?model=${encodeURIComponent(modelName)}&pass=${pass}`;
+      }
+
+      const response = await fetch(url, { method: "POST" });
 
       if (!response.ok) {
         throw new Error(`Failed to start stream: ${response.statusText}`);
@@ -228,12 +268,22 @@ export function Translation() {
 
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
+      let streamCompleted = false;
+      let hadError = false;
 
       if (reader) {
         try {
           while (true) {
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done) {
+              // Stream ended - check if we got [DONE] signal
+              if (!streamCompleted) {
+                console.warn(
+                  "Stream ended without [DONE] signal - connection may have been lost",
+                );
+              }
+              break;
+            }
 
             const chunk = decoder.decode(value, { stream: true });
             const lines = chunk.split("\n");
@@ -241,15 +291,37 @@ export function Translation() {
             for (const line of lines) {
               if (line.startsWith("data: ")) {
                 const dataStr = line.slice(6).trim();
-                if (dataStr === "[DONE]") continue;
+
+                // Check for completion signal
+                if (dataStr === "[DONE]") {
+                  streamCompleted = true;
+                  continue;
+                }
 
                 try {
                   const data = JSON.parse(dataStr);
+
+                  // Check for error messages in the content
+                  if (data.content && data.content.startsWith("ERROR:")) {
+                    hadError = true;
+                    const errorMsg = data.content.substring(6).trim();
+                    console.error("Stream error:", errorMsg);
+                    throw new Error(`LM Studio error: ${errorMsg}`);
+                  }
+
                   if (data.content) {
                     setEditableTranslation((prev) => prev + data.content);
                   }
                 } catch (e) {
-                  // Partial chunk
+                  // If it's our thrown error, re-throw it
+                  if (
+                    e instanceof Error &&
+                    e.message.startsWith("LM Studio error:")
+                  ) {
+                    throw e;
+                  }
+                  // Otherwise just log parse errors
+                  console.debug("Parse error on chunk:", dataStr, e);
                 }
               }
             }
@@ -257,6 +329,13 @@ export function Translation() {
         } finally {
           reader.releaseLock();
         }
+      }
+
+      // Throw error if stream didn't complete properly
+      if (!streamCompleted && !hadError) {
+        throw new Error(
+          "Stream interrupted. The LM Studio server may have stopped or connection was lost.",
+        );
       }
 
       await loadTranslationChapter();
@@ -282,7 +361,22 @@ export function Translation() {
 
     try {
       setIsFetchingPrompt(true);
-      const data = await getActTranslationPrompt(selectedAct.id, modelName);
+
+      // Check if selected item is a SubAct (has actId property from parent Act)
+      const isSubAct = selectedAct.actId !== undefined;
+      let actIdToUse = selectedAct.id;
+
+      if (isSubAct) {
+        // If it's a SubAct, find its parent Act and use that ID
+        const parentAct = acts.find((act) =>
+          act.SubActs?.some((subAct) => subAct.id === selectedAct.id),
+        );
+        if (parentAct) {
+          actIdToUse = parentAct.id;
+        }
+      }
+
+      const data = await getActTranslationPrompt(actIdToUse, modelName);
       setCurrentPrompt(data.messages);
       setIsPreviewPromptOpen(true);
     } catch (error) {
@@ -369,7 +463,7 @@ export function Translation() {
       if (result.failed && result.failed.length > 0) {
         await showError(
           "Analysis Failed",
-          `${result.failed[0].label}: ${result.failed[0].error}`,
+          `${result.failed[0]?.label || "Unknown"}: ${result.failed[0]?.error || "Unknown error"}`,
         );
       }
 
@@ -538,7 +632,7 @@ export function Translation() {
         if (result.failed && result.failed.length > 0) {
           await showError(
             "Analysis Incomplete",
-            `${result.processed} acts analyzed, but ${result.failed.length} act(s) failed (e.g., ${result.failed[0].label}). Check LM Studio for token limits or JSON errors.`,
+            `${result.processed} acts analyzed, but ${result.failed.length} act(s) failed (e.g., ${result.failed[0]?.label || "unknown"}). Check LM Studio for token limits or JSON errors.`,
           );
         }
 
@@ -633,12 +727,34 @@ export function Translation() {
       return;
     }
 
+    if (!editableTranslation.trim()) {
+      await showInfo(
+        "Nothing to Save",
+        "The translation field is empty. Please add translation text before saving.",
+      );
+      return;
+    }
+
     try {
       setIsSaving(true);
-      // Note: Translation saving logic would go here
-      // For now, translations are managed through the pass workflow
+
+      // Check if it's a SubAct or Act
+      const isSubAct = "actId" in selectedAct;
+
+      if (isSubAct) {
+        // Save SubAct translation
+        await updateSubActTranslation(selectedAct.id, editableTranslation);
+      } else {
+        // Save Act translation
+        await updateActTranslation(selectedAct.id, editableTranslation);
+      }
+
+      // Reload chapter to sync the state
       await loadTranslationChapter();
-      await showSuccess("Saved", "Translation was saved for the selected act.");
+      await showSuccess(
+        "Saved",
+        `Translation was saved for ${isSubAct ? "the SubAct" : "the Act"}.`,
+      );
     } catch (error) {
       await showError(
         "Save Failed",
@@ -759,6 +875,95 @@ export function Translation() {
       );
     } finally {
       setIsSaving(false);
+    }
+  }
+
+  async function handleGenerateActPolishes() {
+    if (!selectedAct) {
+      await showInfo(
+        "No Act Selected",
+        "Select an act before generating polish.",
+      );
+      return;
+    }
+
+    try {
+      setIsGeneratingPolish(true);
+      const response = await fetch(
+        `${API_BASE_URL}/translation/polish-batch/act/${selectedAct.id}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            count: 3,
+            temperature: 0.7,
+            model: modelName,
+          }),
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error(`Failed to generate polish: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      // Map response to local state
+      const polishes =
+        data.data?.map((p: any) => ({
+          id: p.id,
+          reason: p.reason || "Polish variation",
+          isSelected: p.isSelected || false,
+        })) || [];
+
+      setActPolishes(polishes);
+      await showSuccess(
+        "Polish Generated",
+        `Generated ${polishes.length} polish variations for Act ${selectedAct.label}`,
+      );
+    } catch (error) {
+      await showError(
+        "Polish Generation Failed",
+        error instanceof Error ? error.message : "Unable to generate polish.",
+      );
+    } finally {
+      setIsGeneratingPolish(false);
+    }
+  }
+
+  async function handleSelectActPolish(polishId: number) {
+    if (!selectedAct) return;
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/translation/polish/${polishId}/select`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error(`Failed to select polish: ${response.statusText}`);
+      }
+
+      // Update local state
+      setActPolishes((prev) =>
+        prev.map((p) => ({
+          ...p,
+          isSelected: p.id === polishId,
+        })),
+      );
+
+      await showSuccess(
+        "Polish Selected",
+        "Polish variation has been applied.",
+      );
+    } catch (error) {
+      await showError(
+        "Selection Failed",
+        error instanceof Error ? error.message : "Unable to select polish.",
+      );
     }
   }
 
@@ -908,60 +1113,90 @@ export function Translation() {
           </div>
           <div className="flex-1 overflow-y-auto p-1 py-2">
             {acts.map((act) => {
-              const termStatus =
-                act.anatomyProfile?.termExtractionStatus || "pending";
-              const analysisStatus =
-                act.anatomyProfile?.actAnalysisStatus ||
-                (act.anatomyProfile?.linguistic ? "success" : "pending");
-              const hasTranslation = Boolean(
-                act.anatomyProfile?.finalTranslation || act.translatedText,
-              );
-              const hasPolish = Boolean(act.Polishes?.[0]?.Edits?.length);
+              // Generate list of SubActs or fallback to Act itself
+              const actItems =
+                act.SubActs && act.SubActs.length > 0
+                  ? act.SubActs.map((subAct) => ({
+                      id: subAct.id,
+                      type: "subact",
+                      label: `SubAct ${subAct.sequence}`,
+                      charCount: subAct.charCount,
+                      tokenCount: subAct.tokenCount,
+                      translated: !!subAct.translatedText,
+                      actSequence: act.sequence,
+                    }))
+                  : [
+                      {
+                        id: act.id,
+                        type: "act",
+                        label: `Act ${act.sequence} (Full)`,
+                        charCount: (act.rawText || "").length,
+                        tokenCount: act.tokenCount,
+                        translated: !!act.translatedText,
+                        actSequence: act.sequence,
+                      },
+                    ];
 
               return (
-                <div
-                  key={act.id}
-                  className={`group flex flex-col px-4 py-3 mx-1 mb-1 rounded-sm cursor-pointer transition-all ${
-                    selectedActId === act.id
-                      ? "bg-[#f2eadc] text-[#4A3D39] border border-[#d8cdbd] shadow-sm"
-                      : "text-[#807068] hover:bg-[#f5efe6] border border-transparent"
-                  }`}
-                  onClick={() => setSelectedActId(act.id)}
-                >
-                  <div className="flex justify-between items-center mb-1">
-                    <span
-                      className={`text-[10px] font-sans uppercase tracking-widest ${selectedActId === act.id ? "font-bold text-[#8B2626]" : ""}`}
-                    >
-                      Act {act.sequence}
-                    </span>
-                    <div className="flex gap-1.5 items-center">
+                <div key={`act-${act.id}`}>
+                  {/* Act Header with Status Indicators */}
+                  <div className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[#666] bg-[#f5ede4] border-b border-[#e0d5c7] flex justify-between items-center">
+                    <span>Act {act.sequence}</span>
+                    <div className="flex gap-1.5">
+                      {/* Extraction Status Indicator */}
                       <div
-                        className={`w-1.5 h-1.5 rounded-full ${termStatus === "success" ? "bg-emerald-500" : termStatus === "error" ? "bg-red-500" : "bg-gray-300"}`}
-                        title={`Term Extraction: ${termStatus}`}
+                        className={`w-2 h-2 rounded-full ${
+                          act.anatomyProfile?.termExtractionStatus
+                            ? "bg-blue-400"
+                            : "bg-gray-300"
+                        }`}
+                        title={`Extraction: ${act.anatomyProfile?.termExtractionStatus || "pending"}`}
                       />
+                      {/* Analysis Status Indicator */}
                       <div
-                        className={`w-1.5 h-1.5 rounded-full ${analysisStatus === "success" ? "bg-blue-400" : analysisStatus === "error" ? "bg-red-500" : "bg-gray-300"}`}
-                        title={`Act Analysis: ${analysisStatus}`}
-                      />
-                      <div
-                        className={`w-1.5 h-1.5 rounded-full ${hasTranslation ? "bg-purple-500" : "bg-gray-300"}`}
-                        title={
-                          hasTranslation ? "Translated" : "Pending Translation"
-                        }
-                      />
-                      <div
-                        className={`w-1.5 h-1.5 rounded-full ${hasPolish ? "bg-amber-500" : "bg-gray-300"}`}
-                        title={hasPolish ? "Polished" : "Pending Polish"}
+                        className={`w-2 h-2 rounded-full ${
+                          act.anatomyProfile?.actAnalysisStatus
+                            ? "bg-green-400"
+                            : "bg-gray-300"
+                        }`}
+                        title={`Analysis: ${act.anatomyProfile?.actAnalysisStatus || "pending"}`}
                       />
                     </div>
                   </div>
-                  <div className="text-[11px] font-serif italic truncate opacity-80">
-                    {act.label}
-                  </div>
-                  <div className="mt-2 text-[8px] font-sans text-[#a0908b] group-hover:text-[#4A3D39] transition-colors">
-                    {(act.rawText || "").length} chars &bull;{" "}
-                    {hasTranslation ? "Ready" : "Pending"}
-                  </div>
+
+                  {/* Act Items */}
+                  {actItems.map((item) => (
+                    <div
+                      key={item.id}
+                      className={`group flex flex-col px-4 py-3 mx-1 mb-1 rounded-sm cursor-pointer transition-all ${
+                        selectedActId === item.id
+                          ? "bg-[#f2eadc] text-[#4A3D39] border border-[#d8cdbd] shadow-sm"
+                          : "text-[#807068] hover:bg-[#f5efe6] border border-transparent"
+                      }`}
+                      onClick={() => setSelectedActId(item.id)}
+                    >
+                      <div className="flex justify-between items-center mb-1">
+                        <span
+                          className={`text-[10px] font-sans uppercase tracking-widest ${
+                            selectedActId === item.id
+                              ? "font-bold text-[#8B2626]"
+                              : ""
+                          }`}
+                        >
+                          {item.label}
+                        </span>
+                        {item.translated && (
+                          <div
+                            className="w-1.5 h-1.5 rounded-full bg-purple-500"
+                            title="Translated"
+                          />
+                        )}
+                      </div>
+                      <div className="mt-2 text-[8px] font-sans text-[#a0908b] group-hover:text-[#4A3D39] transition-colors">
+                        {item.charCount} chars • {item.tokenCount || 0} tokens
+                      </div>
+                    </div>
+                  ))}
                 </div>
               );
             })}
@@ -1042,8 +1277,8 @@ export function Translation() {
               </div>
               <div className="flex-1 p-5 overflow-y-auto bg-white/20">
                 <ActAnalysisCard
-                  linguistic={selectedAct?.anatomyProfile?.linguistic}
-                  narrative={selectedAct?.anatomyProfile?.narrative}
+                  linguistic={selectedAct?.Analysis?.anatomyProfile?.linguistic}
+                  narrative={selectedAct?.Analysis?.anatomyProfile?.narrative}
                 />
               </div>
             </div>
@@ -1090,7 +1325,6 @@ export function Translation() {
               value={editableTranslation}
               onChange={(event) => setEditableTranslation(event.target.value)}
               className="flex-1 p-6 pb-2 resize-none outline-none bg-white font-serif text-[#4A3D39] text-base leading-relaxed selection:bg-rose-100 placeholder:italic placeholder:text-[#A0908B]/50"
-              placeholder="Run Pass 3 on this act to generate translation..."
             />
 
             <div className="flex justify-end p-2 gap-2 border-t border-[#d8cdbd]/50 bg-white/50 shrink-0">
@@ -1111,148 +1345,20 @@ export function Translation() {
               </Button>
             </div>
 
-            {/* Sub-panel: Polish Edits for this Act */}
-            <div className="h-1/3 flex flex-col border-t border-[#d8cdbd] bg-[#f9f7f4] min-h-0">
-              <div className="px-4 py-2 border-b border-[#d8cdbd] shrink-0 flex justify-between items-center">
-                <div className="flex items-center gap-2">
-                  <span className="text-[9px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
-                    Act Polish Refinements
-                  </span>
-                  <Badge variant="secondary" className="h-4 text-[8px]">
-                    PASS 4
-                  </Badge>
-                  {(() => {
-                    const edits = selectedAct?.Polishes?.[0]?.Edits ?? [];
-                    if (edits.length === 0) return null;
-                    const checkedCount = edits.filter(
-                      (e) =>
-                        e.id !== undefined && polishEditChecked[e.id] !== false,
-                    ).length;
-                    return (
-                      <span className="text-[8px] font-sans text-[#807068] bg-[#f2eadc] px-1.5 py-0.5 rounded-sm">
-                        {checkedCount}/{edits.length} selected
-                      </span>
-                    );
-                  })()}
+            {/* Sub-panel: Polish Selector */}
+            <div className="flex-0 max-h-[180px] flex flex-col border-t border-[#d8cdbd] bg-[#f9f7f4] min-h-0 p-4 overflow-y-auto">
+              {selectedAct ? (
+                <PolishSelector
+                  actPolishes={actPolishes}
+                  onGeneratePolishes={handleGenerateActPolishes}
+                  onSelectActPolish={handleSelectActPolish}
+                  isGenerating={isGeneratingPolish}
+                />
+              ) : (
+                <div className="flex items-center justify-center h-full text-[#a0908b] italic text-[11px] text-center">
+                  Select an act to manage polish variations
                 </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => void handleTranslateAct(4)}
-                  disabled={isRunningPass || !selectedAct || !isLmStudioOnline}
-                  className="h-5 text-[8px] text-[#8B2626] p-0 font-sans uppercase"
-                >
-                  Run Polish
-                </Button>
-              </div>
-              <div className="flex-1 overflow-y-auto p-4">
-                {selectedAct?.Polishes?.[0]?.Edits?.length ? (
-                  <div className="grid grid-cols-1 gap-3">
-                    {selectedAct.Polishes[0].Edits.map(
-                      (edit: any, idx: number) => {
-                        const editId: number | undefined = edit.id;
-                        const isChecked =
-                          editId !== undefined
-                            ? polishEditChecked[editId] !== false
-                            : edit.applied !== false;
-
-                        const handleToggle = async () => {
-                          if (editId === undefined) return;
-                          const newVal = !isChecked;
-                          // Optimistic update
-                          setPolishEditChecked((prev) => ({
-                            ...prev,
-                            [editId]: newVal,
-                          }));
-                          try {
-                            await togglePolishEdit(editId, newVal);
-                          } catch {
-                            // Revert on error
-                            setPolishEditChecked((prev) => ({
-                              ...prev,
-                              [editId]: isChecked,
-                            }));
-                          }
-                        };
-
-                        return (
-                          <div
-                            key={idx}
-                            className={`p-3 border rounded-sm bg-white text-[11px] font-serif shadow-sm transition-opacity ${
-                              isChecked
-                                ? "border-[#e8dfcf] opacity-100"
-                                : "opacity-50 border-dashed border-[#d8cdbd]"
-                            }`}
-                          >
-                            <div className="flex items-start gap-3">
-                              {/* Checkbox */}
-                              <button
-                                type="button"
-                                onClick={() => void handleToggle()}
-                                disabled={editId === undefined}
-                                title={
-                                  isChecked
-                                    ? "Uncheck to skip this edit on export"
-                                    : "Check to apply this edit on export"
-                                }
-                                className={`mt-0.5 shrink-0 w-3.5 h-3.5 rounded-sm border flex items-center justify-center transition-colors cursor-pointer ${
-                                  isChecked
-                                    ? "bg-[#2f7a46] border-[#2f7a46]"
-                                    : "bg-white border-[#d8cdbd] hover:border-[#a0908b]"
-                                } ${editId === undefined ? "opacity-40 cursor-not-allowed" : ""}`}
-                              >
-                                {isChecked && (
-                                  <svg
-                                    viewBox="0 0 10 8"
-                                    fill="none"
-                                    className="w-2 h-2"
-                                  >
-                                    <path
-                                      d="M1 4l2.5 2.5L9 1"
-                                      stroke="white"
-                                      strokeWidth="1.5"
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                    />
-                                  </svg>
-                                )}
-                              </button>
-
-                              {/* Edit content */}
-                              <div className="flex-1 min-w-0">
-                                <div className="line-through text-[#8b2626]/60 italic mb-1 break-words">
-                                  &ldquo;{edit.original}&rdquo;
-                                </div>
-                                <div className="font-bold text-[#2f7a46] mb-2 break-words">
-                                  &ldquo;{edit.replacement}&rdquo;
-                                </div>
-                                <div className="text-[9px] font-sans text-[#a0908b] bg-[#f2eadc]/20 p-1 px-2 rounded-sm inline-block">
-                                  {edit.reason}
-                                </div>
-                              </div>
-
-                              {/* Applied badge */}
-                              {isChecked && (
-                                <Badge
-                                  variant="outline"
-                                  className="text-[8px] border-[#2f7a46] text-[#2f7a46] bg-[#ebf5ed] shrink-0"
-                                >
-                                  EXPORT
-                                </Badge>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      },
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center justify-center h-full text-[#a0908b] italic text-[11px] text-center px-4">
-                    No polish refinements for this act. Run Pass 4 to see
-                    improvements.
-                  </div>
-                )}
-              </div>
+              )}
             </div>
           </div>
         </div>
