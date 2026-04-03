@@ -11,6 +11,12 @@ router.post(
 // Run Phase 2 analysis on a single act
 router.post("/acts/:actId/analyze", lexicographerController.analyzeAct);
 
+// Run Phase 2 analysis on a group of acts
+router.post(
+  "/chapters/:chapterId/analyze-group",
+  lexicographerController.analyzeActGroup,
+);
+
 // Get glossary entries for series
 router.get("/series/:seriesId/glossary", lexicographerController.getGlossary);
 
@@ -36,6 +42,12 @@ router.put(
 router.post(
   "/series/:seriesId/glossary/bulk-approve",
   lexicographerController.bulkApprove,
+);
+
+// Resolve term conflicts
+router.post(
+  "/series/:seriesId/glossary/resolve-conflicts",
+  lexicographerController.resolveTermConflicts,
 );
 
 // Get act analysis

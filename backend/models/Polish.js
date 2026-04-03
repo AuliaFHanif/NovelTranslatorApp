@@ -10,11 +10,10 @@ module.exports = (sequelize, DataTypes) => {
           as: 'Act'
         });
       }
-      if (models.PolishEdit) {
-        Polish.hasMany(models.PolishEdit, {
-          foreignKey: 'polishId',
-          as: 'Edits',
-          onDelete: 'CASCADE'
+      if (models.SubAct) {
+        Polish.belongsTo(models.SubAct, {
+          foreignKey: 'subActId',
+          as: 'SubAct'
         });
       }
     }
@@ -23,38 +22,60 @@ module.exports = (sequelize, DataTypes) => {
   Polish.init({
     actId: {
       type: DataTypes.INTEGER,
-      allowNull: false,
+      allowNull: true,
       references: {
         model: 'Acts',
         key: 'id'
       },
       onDelete: 'CASCADE'
     },
+    subActId: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: {
+        model: 'SubActs',
+        key: 'id'
+      },
+      onDelete: 'CASCADE'
+    },
+    scope: {
+      type: DataTypes.ENUM('act', 'subact'),
+      allowNull: false,
+      defaultValue: 'act'
+    },
     modelUsed: {
       type: DataTypes.STRING,
       allowNull: true
     },
-    content: {
+    originalText: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+      comment: 'Snapshot of the text before this polish was applied'
+    },
+    polishedText: {
       type: DataTypes.TEXT,
       allowNull: false
     },
-    editCount: {
-      type: DataTypes.INTEGER,
-      defaultValue: 0
+    reason: {
+      type: DataTypes.TEXT,
+      allowNull: true
     },
-    appliedCount: {
-      type: DataTypes.INTEGER,
-      defaultValue: 0
-    },
-    isActive: {
+    isSelected: {
       type: DataTypes.BOOLEAN,
-      defaultValue: true
+      defaultValue: false
     }
   }, {
     sequelize,
     modelName: 'Polish',
     tableName: 'Polishes',
-    timestamps: true
+    timestamps: true,
+    validate: {
+      eitherActOrSubAct() {
+        if ((this.actId === null) === (this.subActId === null)) {
+          throw new Error('Exactly one of actId or subActId must be set');
+        }
+      }
+    }
   });
 
   return Polish;

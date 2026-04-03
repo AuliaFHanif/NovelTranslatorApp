@@ -1,3 +1,6 @@
+require("dotenv").config();
+console.log("[dotenv] ✓ Environment variables injected");
+
 const express = require("express");
 const cors = require("cors");
 const { sequelize } = require("./models");
