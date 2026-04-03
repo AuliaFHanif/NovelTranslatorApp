@@ -1,34 +1,48 @@
-"use strict";
-const { Model } = require("sequelize");
+'use strict';
+const { Model } = require('sequelize');
+
 module.exports = (sequelize, DataTypes) => {
   class Series extends Model {
-    /**
-     * Helper method for defining associations.
-     * This method is not a part of Sequelize lifecycle.
-     * The `models/index` file will call this method automatically.
-     */
     static associate(models) {
-      this.hasMany(models.Chapter, {
-        foreignKey: "seriesId",
-        onDelete: "CASCADE",
-      });
-      this.hasMany(models.GlossaryEntry, {
-        foreignKey: "scopeId",
-        scope: "series",
-      });
+      if (models.Chapter) {
+        Series.hasMany(models.Chapter, { 
+          foreignKey: 'seriesId',
+          as: 'Chapters'
+        });
+      }
+
+      if (models.GlossaryTerm) {
+        Series.hasMany(models.GlossaryTerm, { 
+          foreignKey: 'seriesId',
+          as: 'GlossaryTerms'
+        });
+      }
     }
   }
-  Series.init(
-    {
-      title: DataTypes.STRING,
-      genre: DataTypes.STRING,
-      description: DataTypes.TEXT,
-      language: DataTypes.ENUM("ja", "zh"),
+
+  Series.init({
+    title: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+      validate: {
+        notEmpty: true
+      }
     },
-    {
-      sequelize,
-      modelName: "Series",
+    language: {
+      type: DataTypes.ENUM('ja', 'zh'),
+      allowNull: false,
+      validate: {
+        isIn: [['ja', 'zh']]
+      }
     },
-  );
+    genre: DataTypes.STRING(255),
+    description: DataTypes.TEXT
+  }, {
+    sequelize,
+    modelName: 'Series',
+    tableName: 'Series',
+    timestamps: true
+  });
+
   return Series;
 };
