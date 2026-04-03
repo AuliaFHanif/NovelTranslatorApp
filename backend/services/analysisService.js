@@ -1,7 +1,9 @@
-const schemas = require("./analysisSchemas");
 const { resolveModel } = require("./resolveModel");
 const { extractJson, countWords } = require("./utils");
 const llmClient = require("./llmClient");
+const { Act, SubAct, Analysis, Chapter, Series } = require("../models");
+const TextMetrics = require("../utils/textMetrics");
+const schemas = require("./analysisSchemas");
 
 class AnalysisService {
   constructor() {}
@@ -38,119 +40,107 @@ class AnalysisService {
   }
 
   /**
-   * Analyze a group of acts together (concatenate text, run single analysis)
-   * Stores identical analysis in all acts' anatomyProfile
-   * @param {Array} acts - Array of act objects to analyze together
-   * @param {Object} options - { model, task }
-   * @returns {Array} Array of updated act objects
+   * Analyze an Act (and its constituent SubActs)
+   * Stores analysis in the Analysis table with segment-specific guidance
+   * @param {number} actId - The ID of the Act to analyze
+   * @param {Object} options - { model }
    */
-  async analyzeActGroup(acts, options = {}) {
-    if (!acts || acts.length === 0) {
-      throw new Error("Must provide at least one act to analyze");
+  async analyzeAct(actId, options = {}) {
+    const act = await Act.findByPk(actId, {
+      include: [
+        { model: SubAct, as: "SubActs", order: [["sequence", "ASC"]] },
+        {
+          model: Chapter,
+          as: "Chapter",
+          include: [{ model: Series, as: "Series" }],
+        },
+      ],
+    });
+
+    if (!act) throw new Error("Act not found");
+
+    // Concatenate all sub-act texts for holistic analysis
+    // Fall back to act.rawText if SubActs don't exist or are empty
+    let fullText;
+    if (act.SubActs && act.SubActs.length > 0) {
+      fullText = act.SubActs.map((s) => s.rawText).join("\n\n");
+    } else {
+      if (!act.rawText) {
+        throw new Error(
+          `Act ${act.id} has no SubActs and no rawText available`,
+        );
+      }
+      fullText = act.rawText;
+      console.log(
+        `[Analysis] No SubActs for Act ${act.label}, using act.rawText`,
+      );
     }
 
-    // Concatenate all act texts
-    const combinedText = acts.map((a) => a.rawText).join("\n\n");
-    const combinedWords = countWords(combinedText);
+    const language = act.Chapter?.Series?.language || "zh";
 
     console.log(
-      `[Grouped Analysis] Analyzing ${acts.length} acts (${combinedWords} words total)`,
-    );
-    console.log(
-      `[Grouped Analysis] Acts: ${acts.map((a) => a.label).join(", ")}`,
+      `[Analysis] Analyzing Act ${act.label} (${TextMetrics.countUnits(fullText, language)} units, ${act.SubActs?.length || 0} subacts)`,
     );
 
-    // Create temporary mock act with combined text for analysis
-    const groupAct = {
-      id: acts[0].id,
-      label: acts.map((a) => a.label).join(" + "),
-      rawText: combinedText,
-      Chapter: acts[0].Chapter,
-    };
+    const modelId = await resolveModel(options.model);
+    const schema = schemas.narrative[language];
 
-    const results = {
-      analyzed: [],
-      failed: [],
-      termsFound: [],
-    };
+    // Add segment count to prompt to get per-segment guidance
+    const messages = [
+      {
+        role: "system",
+        content: this.buildNarrativeSystemPrompt(
+          language,
+          act.Chapter.Series,
+          act.SubActs?.length || 1,
+        ),
+      },
+      {
+        role: "user",
+        content: this.buildNarrativeUserPrompt(act, fullText),
+      },
+    ];
 
     try {
-      // Run extraction on combined text if task is "terms"
-      if (options.task === "terms") {
-        try {
-          console.log(`[Grouped Analysis] Pass 1: Extracting terms from group`);
-          const combinedExtractedTerms = await this.runFullTermExtraction(
-            groupAct,
-            options,
-          );
-          results.termsFound = combinedExtractedTerms;
-        } catch (err) {
-          console.error(
-            `[Grouped Analysis] Term extraction failed:`,
-            err.message,
-          );
-          results.failed.push({
-            stage: "term_extraction",
-            error: err.message,
-          });
-        }
-      }
+      const content = await llmClient.chatCompletion({
+        model: modelId,
+        messages,
+        response_format: schema,
+        temperature: 0.3,
+        max_tokens: 2500,
+      });
 
-      // Run narrative analysis on combined text if task is "all" or "narrative"
-      let narrativeResult = null;
-      if (options.task === "all" || options.task === "narrative") {
-        try {
-          console.log(
-            `[Grouped Analysis] Pass 2: Analyzing narrative for group`,
-          );
-          narrativeResult = await this.analyzeNarrative(groupAct, options);
-        } catch (err) {
-          console.error(
-            `[Grouped Analysis] Narrative analysis failed:`,
-            err.message,
-          );
-          results.failed.push({
-            stage: "narrative_analysis",
-            error: err.message,
-          });
-        }
-      }
+      const result = JSON.parse(extractJson(content));
+      const sanitized = this.sanitizeResult(result);
 
-      // Store identical analysis in all acts
-      for (const act of acts) {
-        const updatedProfile = {
-          ...act.anatomyProfile,
-        };
+      // Extract only narrative and linguistic analysis to store in anatomyProfile
+      const anatomyProfile = {
+        narrative: sanitized.narrativeAnalysis,
+        linguistic: sanitized.linguisticAnalysis,
+      };
 
-        // Only update term status if we were running terms
-        if (options.task === "terms") {
-          updatedProfile.termExtractionStatus = results.failed.some(
-            (f) => f.stage === "term_extraction",
-          )
-            ? "error"
-            : "success";
-        }
+      // Save to Analysis table
+      const [analysis, created] = await Analysis.findOrCreate({
+        where: { actId: act.id },
+        defaults: {
+          actId: act.id,
+          anatomyProfile: anatomyProfile,
+          scope: "act",
+        },
+      });
 
-        if (
-          (options.task === "all" || options.task === "narrative") &&
-          narrativeResult
-        ) {
-          updatedProfile.linguistic = narrativeResult.linguisticAnalysis;
-          updatedProfile.narrative = narrativeResult.narrativeAnalysis;
-          updatedProfile.actAnalysisStatus = "success";
-        }
-
-        await act.update({
-          anatomyProfile: updatedProfile,
-          status: results.failed.length === 0 ? "ready" : "pending",
+      if (!created) {
+        await analysis.update({
+          anatomyProfile: anatomyProfile,
+          updatedAt: new Date(),
         });
-
-        results.analyzed.push(act);
       }
 
-      return results;
+      await act.update({ status: "analyzed" });
+
+      return sanitized;
     } catch (err) {
-      console.error(`[Grouped Analysis] Critical error:`, err.message);
+      console.error(`[Analysis] Failed for act ${act.id}:`, err.message);
       throw err;
     }
   }
@@ -239,17 +229,35 @@ class AnalysisService {
   }
 
   /**
-   * Pass 1: Unified Term Extraction (Optimized Single Call)
-   * Combines character, location/org, and item/concept/technique extraction into one LLM call
+   * Extract terms from a single SubAct
    */
-  async runUnifiedTermExtraction(act, options = {}) {
-    const language = act.Chapter?.Series?.language;
-    if (!language || !["ja", "zh"].includes(language)) {
-      throw new Error(`Unsupported language: ${language}`);
-    }
+  async extractTermsFromSubAct(subActId, options = {}) {
+    const subAct = await SubAct.findByPk(subActId, {
+      include: [
+        {
+          model: Act,
+          as: "Act",
+          include: [
+            {
+              model: Chapter,
+              as: "Chapter",
+              include: [{ model: Series, as: "Series" }],
+            },
+          ],
+        },
+      ],
+    });
+
+    if (!subAct) throw new Error("SubAct not found");
+
+    const language = subAct.Act.Chapter.Series.language || "zh";
+    const series = subAct.Act.Chapter.Series;
+
+    console.log(
+      `[Extraction] Extracting terms from SubAct ${subAct.id} (${TextMetrics.countUnits(subAct.rawText, language)} units)`,
+    );
 
     const modelId = await resolveModel(options.model);
-    const startTime = Date.now();
 
     const messages = [
       {
@@ -258,7 +266,7 @@ class AnalysisService {
       },
       {
         role: "user",
-        content: this.buildTermExtractionUserPrompt(act),
+        content: `### SOURCE TEXT\n[START]\n${subAct.rawText}\n[END]`,
       },
     ];
 
@@ -268,23 +276,127 @@ class AnalysisService {
         messages,
         response_format: schemas.terms.unified,
         temperature: 0.1,
-        max_tokens: 2000, // Increased from 1500 to accommodate combined extraction
+        max_tokens: 2000,
       });
 
-      const result = JSON.parse(extractJson(content));
-      const duration = Date.now() - startTime;
+      // Better error handling for JSON parsing
+      let extractedJson;
+      try {
+        extractedJson = extractJson(content);
+        const parsed = JSON.parse(extractedJson);
+        const rawTerms = parsed.extractedTerms || [];
 
-      console.log(
-        `[LLM] Unified extraction (Act ${act.id}): ${result.extractedTerms?.length || 0} terms in ${duration}ms`,
-      );
+        const sanitized = this.sanitizeResult({
+          extractedTerms: rawTerms,
+        }).extractedTerms;
 
-      return this.sanitizeResult(result).extractedTerms || [];
+        // Process with GlossaryProcessingService (deduplication/identification)
+        const glossaryProcessing = require("./glossaryProcessing");
+        const { candidates, approvedCount } =
+          await glossaryProcessing.identifyTerms(sanitized, subAct, series);
+
+        return {
+          subActId: subAct.id,
+          candidates,
+          approvedCount,
+          rawCount: rawTerms.length,
+        };
+      } catch (jsonErr) {
+        // Log the problematic content for debugging
+        console.error(`[Extraction] JSON parse error for SubAct ${subActId}:`);
+        console.error(`  Error: ${jsonErr.message}`);
+        console.error(`  Extracted JSON length: ${extractedJson?.length || 0}`);
+        console.error(
+          `  First 200 chars: ${extractedJson?.substring(0, 200) || "N/A"}`,
+        );
+        console.error(
+          `  Last 200 chars: ${extractedJson?.substring(-200) || "N/A"}`,
+        );
+
+        // Try simpler fallback extraction
+        console.log(`[Extraction] Attempting simpler fallback extraction...`);
+        try {
+          const fallbackTerms = await this.fallbackSimpleExtraction(
+            subAct.rawText,
+            language,
+            modelId,
+          );
+          const glossaryProcessing = require("./glossaryProcessing");
+          const { candidates, approvedCount } =
+            await glossaryProcessing.identifyTerms(
+              fallbackTerms,
+              subAct,
+              series,
+            );
+
+          return {
+            subActId: subAct.id,
+            candidates,
+            approvedCount,
+            rawCount: fallbackTerms.length,
+            method: "fallback",
+          };
+        } catch (fallbackErr) {
+          console.error(
+            `[Extraction] Fallback extraction also failed: ${fallbackErr.message}`,
+          );
+          // Return empty candidates for this subact
+          return {
+            subActId: subAct.id,
+            candidates: [],
+            approvedCount: 0,
+            rawCount: 0,
+            error: `Both extraction methods failed: ${jsonErr.message}`,
+          };
+        }
+      }
     } catch (err) {
-      console.error(
-        `Unified term extraction failed for act ${act.id}:`,
-        err.message,
-      );
-      throw err;
+      console.error(`[Extraction] Failed for subAct ${subActId}:`, err.message);
+      // Return empty candidates instead of throwing
+      return {
+        subActId: subAct.id,
+        candidates: [],
+        approvedCount: 0,
+        rawCount: 0,
+        error: err.message,
+      };
+    }
+  }
+
+  /**
+   * Fallback simpler extraction - just extract term names without complex schema
+   * Used when full extraction fails due to JSON parsing errors
+   */
+  async fallbackSimpleExtraction(rawText, language, modelId) {
+    const simplePrompt = `Extract the most important proper nouns (characters, locations, organizations, items, concepts, techniques) from the following ${language === "ja" ? "Japanese" : "Chinese"} text. 
+Return ONLY a JSON object with an "terms" array containing objects with "term" (exact source text) and "type" (character/location/organization/item/concept/technique) fields, nothing else.
+
+Text:
+${rawText.substring(0, 2000)}`;
+
+    try {
+      const content = await llmClient.chatCompletion({
+        model: modelId,
+        messages: [{ role: "user", content: simplePrompt }],
+        temperature: 0.1,
+        max_tokens: 1000,
+      });
+
+      const json = extractJson(content);
+      const parsed = JSON.parse(json);
+      const terms = parsed.terms || [];
+
+      // Convert simple format to extraction format
+      return terms.map((t) => ({
+        term: t.term,
+        type: t.type || "concept",
+        proposedTranslation: t.term, // Fallback to term itself
+        context: "Extracted via fallback method",
+        confidence: 0.5, // Lower confidence for fallback
+      }));
+    } catch (err) {
+      console.error(`[Extraction] Fallback extraction failed: ${err.message}`);
+      return []; // Return empty array if even fallback fails
     }
   }
 
@@ -458,8 +570,8 @@ ${truncated}
 [END]`;
   }
 
-  buildNarrativeSystemPrompt(language, series) {
-    const base = `You are a literary analyst specializing in ${language === "ja" ? "Japanese" : "Chinese"} narrative structure.`;
+  buildNarrativeSystemPrompt(language, series, segmentCount = 1) {
+    const base = `You are a senior literary analyst specializing in ${language === "ja" ? "Japanese" : "Chinese"} narrative structure.`;
 
     const common = `
 STRICT LANGUAGE RULE:
@@ -467,7 +579,15 @@ STRICT LANGUAGE RULE:
 - Use a 0.0 to 1.0 scale for all decimal intensities/frequencies.
 
 Series: ${series?.title || "Unknown"}
-Genre: ${series?.genre || "Unknown"}`;
+Genre: ${series?.genre || "Unknown"}
+
+SEGMENT GUIDANCE:
+The provided text consists of ${segmentCount} segments (SubActs). 
+Your analysis MUST include a "segmentGuidance" object in your anatomyProfile, where each key is the 1-based segment sequence (e.g., "1", "2") and the value contains:
+- "tone": Specific tone for this segment.
+- "pacing": Specific pacing (slow, fast, urgent).
+- "focus": Primary narrative focus.
+`;
 
     if (language === "ja") {
       return `${base}
@@ -490,7 +610,7 @@ Analyze for:
     }
   }
 
-  buildNarrativeUserPrompt(act) {
+  buildNarrativeUserPrompt(act, fullText) {
     const context = [];
     if (act.Chapter?.Series?.title)
       context.push(`Series: ${act.Chapter.Series.title}`);
@@ -498,19 +618,52 @@ Analyze for:
       context.push(`Chapter ${act.Chapter.number}: ${act.Chapter.title}`);
     context.push(`Act: ${act.label}`);
 
-    const text = act.rawText;
     const truncated =
-      text.length > 3000 ? text.substring(0, 3000) + "... [truncated]" : text;
+      fullText.length > 8000
+        ? fullText.substring(0, 8000) + "... [truncated]"
+        : fullText;
 
     return `### CONTEXT
 ${context.join("\n")}
 
-### SOURCE TEXT
+### SOURCE TEXT (INCLUDING SUB-ACTS)
 [START]
 ${truncated}
 [END]
 
-Analyze the narrative profile and linguistic markers of the source text above.`;
+Analyze the narrative profile and provide specific guidance for each of the segments within this Act.`;
+  }
+
+  /**
+   * Analyze a group of Acts together (e.g., 1A, 1B)
+   * Returns analysis results for each act in the group
+   */
+  async analyzeActGroup(acts, options = {}) {
+    const results = {
+      analyzed: [],
+      failed: [],
+      termsFound: [],
+    };
+
+    for (const act of acts) {
+      try {
+        // Analyze this act (gets tone for whole act + all SubActs)
+        const analysis = await this.analyzeAct(act.id, options);
+        results.analyzed.push({
+          actId: act.id,
+          label: act.label,
+          analysis,
+        });
+      } catch (err) {
+        console.error(`[Analysis] Failed for act ${act.id}:`, err.message);
+        results.failed.push({
+          actId: act.id,
+          error: err.message,
+        });
+      }
+    }
+
+    return results;
   }
 
   /**

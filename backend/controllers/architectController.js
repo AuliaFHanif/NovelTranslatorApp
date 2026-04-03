@@ -1,20 +1,29 @@
 /**
  * Architect Controller - Phase 2 Segmentation
- * 
+ *
  * Changes:
  * 1. Better error handling and logging
  * 2. Performance timing logs
  * 3. Cleaner response structure
  */
 
-const { Chapter, Act } = require('../models');
+const {
+  Chapter,
+  Act,
+  Series,
+  SubAct,
+  Analysis,
+  Polish,
+  TermAppearance,
+} = require("../models");
+const { Op } = require("sequelize");
 const {
   normalizeParagraphs,
   normalizeLineBreaksAndHtml,
-} = require('../services/paragraphNormalizer');
-const { callSegmentationAI } = require('../services/aiSegmentation');
-const actCreationService = require('../services/actCreation');
-const TextMetrics = require('../utils/textMetrics');
+} = require("../services/paragraphNormalizer");
+const { callSegmentationAI } = require("../services/aiSegmentation");
+const actCreationService = require("../services/actCreation");
+const TextMetrics = require("../utils/textMetrics");
 
 /**
  * Calculate coverage statistics for diagnostics
@@ -23,9 +32,10 @@ function getCoverageDiagnostics(paragraphs, boundaries) {
   const lastBoundary = boundaries[boundaries.length - 1] || 0;
   const paragraphCount = paragraphs.length;
   const coveredParagraphs = Math.min(lastBoundary, paragraphCount);
-  const coveragePercent = paragraphCount === 0
-    ? 0
-    : Number(((coveredParagraphs / paragraphCount) * 100).toFixed(2));
+  const coveragePercent =
+    paragraphCount === 0
+      ? 0
+      : Number(((coveredParagraphs / paragraphCount) * 100).toFixed(2));
 
   return {
     paragraphCount,
@@ -39,82 +49,99 @@ function getCoverageDiagnostics(paragraphs, boundaries) {
 
 /**
  * POST /api/chapters/:chapterId/architect
- * Run Phase 2 segmentation
+ * Run Phase 2 hierarchical segmentation
  */
 async function runArchitectPhase(req, res) {
   const chapterId = Number(req.params.chapterId);
   const startTime = Date.now();
 
   if (!Number.isInteger(chapterId) || chapterId < 1) {
-    return res.status(400).json({ error: 'Invalid chapterId' });
+    return res.status(400).json({ error: "Invalid chapterId" });
   }
 
   let chapter;
 
   try {
-    // Fetch chapter
-    chapter = await Chapter.findByPk(chapterId);
+    // 1. Fetch chapter
+    chapter = await Chapter.findByPk(chapterId, {
+      include: [{ model: Series, as: "Series" }],
+    });
     if (!chapter) {
-      return res.status(404).json({ error: 'Chapter not found' });
+      return res.status(404).json({ error: "Chapter not found" });
     }
 
     if (!chapter.rawText || !chapter.rawText.trim()) {
-      return res.status(400).json({ error: 'No raw text' });
+      return res.status(400).json({ error: "No raw text" });
     }
 
-    console.log(`[Architect] Starting segmentation for chapter ${chapterId}`);
-    await chapter.update({ status: 'processing' });
+    const language = chapter.Series?.language || "zh";
 
-    // Clear existing acts
-    await Act.destroy({ where: { chapterId } });
-    console.log(`[Architect] Cleared existing acts`);
+    console.log(
+      `[Architect] Starting hierarchical segmentation for chapter ${chapterId} (${language})`,
+    );
+    await chapter.update({ status: "processing" });
 
-    // Normalize text
-    const normalizedSourceText = normalizeLineBreaksAndHtml(chapter.rawText);
+    // 2. HARD RESET: Clear existing Acts and ALL children
+    const existingActs = await Act.findAll({ where: { chapterId } });
+    const actIds = existingActs.map((a) => a.id);
+
+    if (actIds.length > 0) {
+      console.log(
+        `[Architect] Hard Reset: Purging ${actIds.length} existing acts and children`,
+      );
+      await SubAct.destroy({ where: { actId: actIds } });
+      await Analysis.destroy({ where: { actId: actIds } });
+      await Polish.destroy({
+        where: {
+          [Op.or]: [{ actId: actIds }, { subActId: { [Op.ne]: null } }],
+        },
+      });
+      await TermAppearance.destroy({
+        where: {
+          [Op.or]: [{ actId: actIds }, { subActId: { [Op.ne]: null } }],
+        },
+      });
+      await Act.destroy({ where: { chapterId } });
+    }
+
+    // 3. Normalize text
     const paragraphs = normalizeParagraphs(chapter.rawText);
 
     if (paragraphs.length === 0) {
-      throw new Error('No paragraphs could be extracted from chapter text');
+      throw new Error("No paragraphs could be extracted from chapter text");
     }
 
-    const totalMetrics = TextMetrics.calculateParagraphMetrics(paragraphs);
-    const totalTokens = totalMetrics.reduce((s, m) => s + m.estimatedTokens, 0);
-    const totalWords = totalMetrics.reduce((s, m) => s + m.unifiedWords, 0);
+    const units = TextMetrics.countUnits(chapter.rawText, language);
+    console.log(`[Architect] Text units: ${units} (${language})`);
 
-    console.log(`[Architect] Text metrics: ${paragraphs.length} paragraphs, ${totalTokens} tokens, ${totalWords} words`);
-
-    // AI Segmentation
+    // 4. AI Segmentation (Recursive)
     const segStartTime = Date.now();
-    const segmentation = await callSegmentationAI(paragraphs);
+    const segmentation = await callSegmentationAI(paragraphs, { language });
     const segDuration = Date.now() - segStartTime;
 
-    console.log(`[Architect] AI segmentation completed in ${segDuration}ms, boundaries: [${segmentation.boundaries.join(', ')}]`);
+    console.log(`[Architect] AI segmentation completed in ${segDuration}ms`);
+    console.log(
+      `[Architect] Segmentation breakdown: ${segmentation.batchCount} SubActs from ${segmentation.acts?.length || 0} Acts`,
+    );
 
-    // Quality check
-    if (paragraphs.length > 1 && segmentation.boundaries.length < 2) {
-      throw new Error(
-        'Segmentation quality check failed: expected at least 2 boundaries for multi-paragraph chapter'
-      );
-    }
-
-    const coverageDiagnostics = getCoverageDiagnostics(paragraphs, segmentation.boundaries);
-
-    // Create acts
+    // 5. Create acts and SubActs
     const createStartTime = Date.now();
     const acts = await actCreationService.createActs(
       chapterId,
       paragraphs,
-      segmentation
+      segmentation,
+      language,
     );
     const createDuration = Date.now() - createStartTime;
 
-    console.log(`[Architect] Created ${acts.length} acts in ${createDuration}ms`);
+    console.log(
+      `[Architect] Created ${acts.length} acts in ${createDuration}ms`,
+    );
 
     // Update chapter status
-    await chapter.update({ status: 'ready' });
+    await chapter.update({ status: "ready" });
 
     const totalDuration = Date.now() - startTime;
-    console.log(`[Architect] Phase 2 complete in ${totalDuration}ms`);
 
     return res.status(200).json({
       success: true,
@@ -122,7 +149,6 @@ async function runArchitectPhase(req, res) {
         chapterId,
         actsCreated: acts.length,
         segmentationSource: segmentation.source,
-        batchCount: segmentation.batchCount || 1,
         timing: {
           total: totalDuration,
           aiSegmentation: segDuration,
@@ -130,30 +156,23 @@ async function runArchitectPhase(req, res) {
         },
         metrics: {
           paragraphs: paragraphs.length,
-          totalTokens,
-          totalWords,
+          totalUnits: units,
         },
-        coverage: coverageDiagnostics,
         acts: acts.map((act) => ({
           id: act.id,
           label: act.label,
           sequence: act.sequence,
           status: act.status,
-          tokenCount: act.tokenCount,
         })),
       },
     });
   } catch (error) {
     console.error(`[Architect] Error: ${error.message}`);
-    console.error(error.stack);
-
-    if (chapter) {
-      await chapter.update({ status: 'error' });
-    }
+    if (chapter) await chapter.update({ status: "pending" });
 
     return res.status(500).json({
-      error: error.message || 'Segmentation failed',
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined,
+      error: error.message || "Segmentation failed",
+      details: process.env.NODE_ENV === "development" ? error.stack : undefined,
     });
   }
 }
@@ -167,26 +186,29 @@ async function updateAct(req, res) {
   const { rawText } = req.body;
 
   if (!Number.isInteger(actId) || actId < 1) {
-    return res.status(400).json({ error: 'Invalid actId' });
+    return res.status(400).json({ error: "Invalid actId" });
   }
 
-  if (!rawText || typeof rawText !== 'string' || !rawText.trim()) {
-    return res.status(400).json({ error: 'rawText is required and must be non-empty' });
+  if (!rawText || typeof rawText !== "string" || !rawText.trim()) {
+    return res
+      .status(400)
+      .json({ error: "rawText is required and must be non-empty" });
   }
 
   try {
     let act = await Act.findByPk(actId);
     if (!act) {
-      return res.status(404).json({ error: 'Act not found' });
+      return res.status(404).json({ error: "Act not found" });
     }
 
     const chapter = await act.getChapter();
     if (!chapter) {
-      return res.status(404).json({ error: 'Parent chapter not found' });
+      return res.status(404).json({ error: "Parent chapter not found" });
     }
 
     const wordCount = TextMetrics.countUnifiedWords(rawText);
-    const { maxUnifiedWordsPerAct } = require('../config/segmentation').boundaries;
+    const { maxUnifiedWordsPerAct } =
+      require("../config/segmentation").boundaries;
 
     // Check if split needed
     if (wordCount > maxUnifiedWordsPerAct) {
@@ -195,10 +217,12 @@ async function updateAct(req, res) {
       const paragraphs = normalizeParagraphs(normalizedText);
 
       if (paragraphs.length === 0) {
-        return res.status(400).json({ error: 'No paragraphs found in updated text' });
+        return res
+          .status(400)
+          .json({ error: "No paragraphs found in updated text" });
       }
 
-      const baseLabel = act.label.replace(/[A-Z]$/, '');
+      const baseLabel = act.label.replace(/[A-Z]$/, "");
       const baseLabelNum = parseInt(baseLabel) || act.sequence;
 
       // Delete old act
@@ -216,19 +240,19 @@ async function updateAct(req, res) {
           label: `${baseLabelNum}${split.label}`,
           rawText: split.text,
           tokenCount: split.tokens,
-          segmentSource: act.segmentSource || 'manual',
-          status: 'pending',
+          segmentSource: act.segmentSource || "manual",
+          status: "pending",
         });
 
         newActs.push(newAct);
 
         // Dependencies
         if (j > 0) {
-          const { ActDependency } = require('../models');
+          const { ActDependency } = require("../models");
           await ActDependency.create({
             actId: newAct.id,
             dependsOnActId: newActs[j - 1].id,
-            dependencyType: 'translation_sequence',
+            dependencyType: "translation_sequence",
           });
         }
       }
@@ -263,7 +287,7 @@ async function updateAct(req, res) {
       await act.save();
     }
 
-    const { Polish, PolishEdit } = require('../models');
+    const { Polish, PolishEdit } = require("../models");
     await PolishEdit.destroy({ where: { actId: act.id } });
     await Polish.destroy({ where: { actId: act.id } });
 
@@ -292,20 +316,20 @@ async function deleteAct(req, res) {
   const actId = Number(req.params.id);
 
   if (!Number.isInteger(actId) || actId < 1) {
-    return res.status(400).json({ error: 'Invalid actId' });
+    return res.status(400).json({ error: "Invalid actId" });
   }
 
   try {
     const act = await Act.findByPk(actId);
     if (!act) {
-      return res.status(404).json({ error: 'Act not found' });
+      return res.status(404).json({ error: "Act not found" });
     }
 
     const chapterId = act.chapterId;
     const actLabel = act.label;
 
     // Clean up appearances
-    const { TermAppearance } = require('../models');
+    const { TermAppearance } = require("../models");
     const appearanceCount = await TermAppearance.destroy({
       where: { actId: act.id },
     });
@@ -316,7 +340,7 @@ async function deleteAct(req, res) {
     // Reorder remaining acts
     const remainingActs = await Act.findAll({
       where: { chapterId },
-      order: [['sequence', 'ASC']],
+      order: [["sequence", "ASC"]],
     });
 
     let newSequence = 1;

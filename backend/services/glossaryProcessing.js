@@ -15,115 +15,86 @@ class GlossaryProcessingService {
    * Identify terms and separate into "already approved" and "new candidates"
    *
    * @param {Array} extractedTerms - From AI analysis
-   * @param {Object} act - Act instance
+   * @param {Object} subAct - SubAct instance
+   * @param {Object} series - Series instance
    * @returns {Object} { candidates, approvedAppearances }
    */
-  async identifyTerms(extractedTerms, act) {
-    const seriesId = act.Chapter?.seriesId;
-    const language = act.Chapter?.Series?.language;
+  async identifyTerms(extractedTerms, subAct, series) {
+    const seriesId = series.id;
+    const language = series.language;
     const candidates = [];
-    const approvedAppearances = []; // Batch collect appearances
+    const approvedAppearances = [];
     let approvedCount = 0;
 
-    // Load glossary cache for this series (lazy-load per act)
+    // Load glossary cache for this series
     const glossaryCache = await loadSeriesGlossary(seriesId);
-    const queryCountStart = this._dbQueryCount || 0;
 
-    // Apply term validation first
+    // Filter validated terms
     const validatedTerms = this.validateExtractedTerms(extractedTerms);
     console.log(
-      `[TermValidation] Validated ${validatedTerms.length}/${extractedTerms.length} terms`,
+      `[TermIdentification] SubAct ${subAct.id}: Processing ${validatedTerms.length} terms`,
     );
 
     for (const extracted of validatedTerms) {
-      try {
-        // Normalize extracted data (handle potential AI property name variations)
-        const normalized = {
-          term:
-            extracted.term ||
-            extracted.name ||
-            extracted.text ||
-            extracted.word,
-          type: extracted.type || "term",
-          context:
-            extracted.context ||
-            extracted.contextSentence ||
-            extracted.sentence ||
-            "",
-          proposedTranslation:
-            extracted.proposedTranslation || extracted.translation || "",
-          confidence:
-            typeof extracted.confidence === "number"
-              ? extracted.confidence
-              : 0.8,
-        };
+      const normalized = {
+        term: (extracted.term || "").trim(),
+        type: extracted.type || "term",
+        context: extracted.context || "",
+        proposedTranslation: extracted.proposedTranslation || "",
+        confidence:
+          typeof extracted.confidence === "number" ? extracted.confidence : 0.8,
+      };
 
-        if (!normalized.term) {
-          console.warn(
-            `[Phase 3] AI returned term without name/text. Skipping.`,
-            extracted,
-          );
+      if (!normalized.term) continue;
+
+      // Check 1: Existence in Context Library (Approved)
+      const existingTerm = this.findExistingTermFromCache(
+        normalized,
+        glossaryCache,
+      );
+
+      if (existingTerm && existingTerm.status === "approved") {
+        approvedAppearances.push({
+          termId: existingTerm.id,
+          subActId: subAct.id,
+          contextSnippet: normalized.context,
+          confidence: normalized.confidence,
+          frequency: 1,
+        });
+        approvedCount++;
+      } else {
+        // Check 2: Batch duplicates (Similarity within this extraction)
+        const batchDuplicate = candidates.find(
+          (p) =>
+            require("./utils").similarity(
+              require("./utils").normalizeTerm(p.term),
+              require("./utils").normalizeTerm(normalized.term),
+            ) > 0.85,
+        );
+
+        if (batchDuplicate) {
+          // Merge contexts or just ignore (can track frequency)
+          batchDuplicate.frequency = (batchDuplicate.frequency || 1) + 1;
           continue;
         }
 
-        // 1. Check if term already exists and is approved (using cache)
-        const existingTerm = this.findExistingTermFromCache(
-          normalized,
-          glossaryCache,
-        );
-
-        if (existingTerm && existingTerm.status === "approved") {
-          // Record appearance immediately for approved terms
-          console.log(
-            `[Phase 3] Logging appearance for EXISTING APPROVED term: ${normalized.term}`,
-          );
-          approvedAppearances.push({
-            termId: existingTerm.id,
-            actId: act.id,
-            contextSentence: normalized.context,
-            confidence: normalized.confidence,
-            extractedAt: new Date(),
-          });
-          approvedCount++;
-
-          // Also handle variants for existing terms
-          await this.handleVariants(existingTerm, normalized.term);
-        } else {
-          // If not approved (unseen or pending), treat as candidate
-          console.log(
-            `[Phase 3] Identified NEW CANDIDATE: ${normalized.term} (Existing: ${!!existingTerm})`,
-          );
-          candidates.push({
-            ...normalized,
-            existingId: existingTerm?.id || null,
-            actId: act.id,
-            actLabel: act.label,
-          });
-        }
-      } catch (err) {
-        console.error(`Failed to identify term:`, err.message);
+        candidates.push({
+          ...normalized,
+          existingId: existingTerm?.id || null,
+          subActId: subAct.id,
+          seriesId: series.id,
+        });
       }
     }
 
-    // Batch insert all approved appearances
+    // Batch insert approved appearances
     if (approvedAppearances.length > 0) {
-      try {
-        await TermAppearance.bulkCreate(approvedAppearances, {
-          fields: [
-            "termId",
-            "actId",
-            "contextSentence",
-            "confidence",
-            "extractedAt",
-          ],
-          ignoreDuplicates: true,
-        });
-        console.log(
-          `[Batch] Inserted ${approvedAppearances.length} approved appearances in 1 batch`,
-        );
-      } catch (err) {
-        console.error(`Failed to batch insert appearances:`, err.message);
-      }
+      await TermAppearance.bulkCreate(approvedAppearances, {
+        ignoreDuplicates: true,
+      });
+      console.log(
+        `[TermIdentification] Recorded ${approvedAppearances.length} approved appearances for SubAct ${subAct.id}`,
+      );
     }
 
     return { candidates, approvedCount };
@@ -402,6 +373,14 @@ class GlossaryProcessingService {
   }
 
   async recordAppearance(termId, actId, extracted) {
+    // Skip recording if actId is not provided (e.g., from bulk-approve without source context)
+    if (!actId) {
+      console.log(
+        `[Phase 3] Skipping appearance recording for termId ${termId} - no actId provided`,
+      );
+      return null;
+    }
+
     // Use linking table - NEW SCHEMA PATTERN
     console.log(
       `[Phase 3] Recording appearance for termId: ${termId} in actId: ${actId}`,
@@ -412,17 +391,17 @@ class GlossaryProcessingService {
         actId,
       },
       defaults: {
-        contextSentence: extracted.context,
-        confidence: extracted.confidence,
+        contextSentence: extracted?.context,
+        confidence: extracted?.confidence,
         extractedAt: new Date(),
       },
     });
 
     // Update if already exists but higher confidence
-    if (!created && extracted.confidence > appearance.confidence) {
+    if (!created && extracted?.confidence > appearance.confidence) {
       await appearance.update({
-        contextSentence: extracted.context,
-        confidence: extracted.confidence,
+        contextSentence: extracted?.context,
+        confidence: extracted?.confidence,
       });
     }
 

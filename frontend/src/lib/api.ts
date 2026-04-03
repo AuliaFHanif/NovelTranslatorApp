@@ -1,4 +1,5 @@
 export type SourceLanguage = "ja" | "zh";
+export type Scope = "act" | "subact";
 
 export interface PolishEdit {
   id?: number;
@@ -49,6 +50,24 @@ export type TranslationPassState =
   | "pass3_done"
   | "pass4_done";
 
+export interface SubAct {
+  id: number;
+  actId: number;
+  sequence: number;
+  rawText: string;
+  translatedText: string | null;
+  tokenCount: number;
+  charCount: number;
+  Analysis?: {
+    id: number;
+    subActId: number;
+    anatomyProfile: any;
+    scope: "subact";
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Act {
   id: number;
   chapterId: number;
@@ -61,11 +80,14 @@ export interface Act {
     finalTranslation?: string;
     linguistic?: any;
     narrative?: any;
-    pass4Edits?: PolishEdit[];
-    pass4Polished?: string;
+    segmentGuidance?: Record<string, any>; // New
     termExtractionStatus?: string;
     actAnalysisStatus?: string;
+    pass4Edits?: PolishEdit[];
+    pass4Polished?: string;
   };
+  SubActs?: SubAct[]; // New
+  Analysis?: any; // New
   pass4Edits?: PolishEdit[];
   pass4Polished?: string;
   PolishEdits?: PolishEdit[];
@@ -409,7 +431,7 @@ export async function streamActTranslation(
   onChunk: (text: string) => void,
 ): Promise<void> {
   const url = `${API_BASE_URL}/translation/acts/${actId}/stream?model=${encodeURIComponent(model)}`;
-  const response = await fetch(url);
+  const response = await fetch(url, { method: "POST" });
 
   if (!response.ok) {
     throw new Error(`Failed to start stream: ${response.statusText}`);
@@ -470,15 +492,29 @@ export async function runActPass(
     max_tokens?: number;
   },
 ): Promise<TranslationPassResult> {
-  const result = await requestJson<ApiItemResponse<TranslationPassResult>>(
-    `/translation/acts/${actId}/pass`,
-    {
-      method: "POST",
-      body: JSON.stringify({ pass, ...(options || {}) }),
-    },
-  );
-
-  return result.data;
+  // Pass 3 is translation, Pass 4 is polish
+  // For now, map to appropriate endpoints
+  if (pass === 3) {
+    // Translation endpoint - currently there's no single act translate endpoint
+    // so we return a placeholder
+    throw new Error("Pass 3 on individual acts not yet implemented");
+  }
+  if (pass === 4) {
+    // Polish endpoint
+    await requestJson<ApiItemResponse<Polish>>(
+      `/translation/polish/act/${actId}`,
+      {
+        method: "POST",
+        body: JSON.stringify(options || {}),
+      },
+    );
+    return {
+      act: {} as Act,
+      pass: 4,
+      output: "Polish completed",
+    };
+  }
+  throw new Error(`Pass ${pass} not supported`);
 }
 
 export async function runChapterPass(
@@ -492,15 +528,42 @@ export async function runChapterPass(
     max_tokens?: number;
   },
 ): Promise<ChapterPassResult> {
-  const result = await requestJson<ApiItemResponse<ChapterPassResult>>(
-    `/translation/chapters/${chapterId}/pass`,
-    {
-      method: "POST",
-      body: JSON.stringify({ pass, ...(options || {}) }),
-    },
-  );
+  if (pass === 3) {
+    // Pass 3: Translation - translates all SubActs in the chapter
+    const result = await requestJson<any>(
+      `/translation/chapters/${chapterId}/translate`,
+      {
+        method: "POST",
+        body: JSON.stringify(options || {}),
+      },
+    );
+    // Convert response to ChapterPassResult format
+    return {
+      pass: 3,
+      completed: result.completed || 0,
+      failed: result.failed || 0,
+      failures: result.failures || [],
+      acts: [],
+    };
+  }
 
-  return result.data;
+  if (pass === 4) {
+    // Pass 4: Polish/Export - finalizes acts with polish
+    await requestJson<any>(`/translation/chapters/${chapterId}/export`, {
+      method: "POST",
+      body: JSON.stringify(options || {}),
+    });
+    // Convert response to ChapterPassResult format
+    return {
+      pass: 4,
+      completed: 1,
+      failed: 0,
+      failures: [],
+      acts: [],
+    };
+  }
+
+  throw new Error(`Pass ${pass} not supported for chapters`);
 }
 
 export async function runArchitectPhase(
@@ -544,6 +607,36 @@ export async function deleteAct(actId: number): Promise<{
   });
 
   return result.data || result;
+}
+
+export async function updateSubActTranslation(
+  subActId: number,
+  translatedText: string,
+): Promise<SubAct> {
+  const result = await requestJson<ApiItemResponse<SubAct>>(
+    `/translation/subacts/${subActId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ translatedText }),
+    },
+  );
+
+  return result.data;
+}
+
+export async function updateActTranslation(
+  actId: number,
+  translatedText: string,
+): Promise<Act> {
+  const result = await requestJson<ApiItemResponse<Act>>(
+    `/translation/acts/${actId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ translatedText }),
+    },
+  );
+
+  return result.data;
 }
 
 /**
