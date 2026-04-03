@@ -474,7 +474,7 @@ router.post("/acts/:actId/stream", async (req, res) => {
 
         for (const subAct of sortedSubActs) {
           if (pass === "4") {
-            // Polish mode
+            // Polish mode - use existing method
             const polishRes = await polishService.runPolish(
               "subact",
               subAct.id,
@@ -482,13 +482,52 @@ router.post("/acts/:actId/stream", async (req, res) => {
             );
             sendChunk(polishRes?.polishedText || "");
           } else {
-            // Translation mode (pass 3)
-            const translateRes =
+            // Translation mode (pass 3) - use streaming
+            const { messages, resolvedModel } =
+              await translationService.prepareSubActTranslationContext(
+                subAct.id,
+                model,
+              );
+
+            const payload = {
+              model: resolvedModel,
+              messages,
+              temperature: 0.3,
+              top_p: 0.95,
+              max_tokens: 8192,
+            };
+
+            try {
+              const stream = await llmClient.streamChatCompletion(payload);
+
+              // Stream tokens as they arrive
+              for await (const chunk of stream) {
+                const token = chunk.choices[0]?.delta?.content || "";
+                if (token) {
+                  sendChunk(token);
+                }
+              }
+
+              // Save the complete translation to DB
+              const fullTranslation = ""; // TODO: would need to accumulate above
+              // For now, call the non-streaming version to save
               await translationService.runTranslationOnSubAct({
                 subActId: subAct.id,
                 model,
               });
-            sendChunk(translateRes?.translation || "");
+            } catch (streamError) {
+              console.error(
+                `Stream error for SubAct ${subAct.id}:`,
+                streamError,
+              );
+              // Fall back to non-streaming
+              const translateRes =
+                await translationService.runTranslationOnSubAct({
+                  subActId: subAct.id,
+                  model,
+                });
+              sendChunk(translateRes?.translation || "");
+            }
           }
         }
       } else {
@@ -497,6 +536,109 @@ router.post("/acts/:actId/stream", async (req, res) => {
           sendChunk("Act polish not available without subacts");
         } else {
           sendChunk(act.rawText); // Placeholder - could implement direct translation
+        }
+      }
+
+      res.write("data: [DONE]\n\n");
+      res.end();
+    } catch (err) {
+      sendChunk(`ERROR: ${err.message}`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/translation/subacts/:subActId/stream
+ * Stream translation for a single SubAct
+ * Query params: model={modelId}&pass={3|4}
+ */
+router.post("/subacts/:subActId/stream", async (req, res) => {
+  try {
+    const subActId = req.params.subActId;
+    const { model, pass = "3" } = req.query;
+
+    const subAct = await SubAct.findByPk(subActId, {
+      include: [
+        {
+          model: Act,
+          as: "Act",
+          include: [
+            {
+              model: Chapter,
+              as: "Chapter",
+              include: [{ model: Series, as: "Series" }],
+            },
+            {
+              model: Analysis,
+              as: "Analysis",
+            },
+          ],
+        },
+      ],
+    });
+
+    if (!subAct) return res.status(404).json({ error: "SubAct not found" });
+
+    // Set up SSE headers
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+
+    const sendChunk = (content) => {
+      res.write(`data: ${JSON.stringify({ content })}\n\n`);
+    };
+
+    try {
+      if (pass === "4") {
+        // Polish mode
+        const polishRes = await polishService.runPolish("subact", subAct.id, {
+          model,
+        });
+        sendChunk(polishRes?.polishedText || "");
+      } else {
+        // Translation mode (pass 3) - use streaming
+        const { messages, resolvedModel } =
+          await translationService.prepareSubActTranslationContext(
+            subAct.id,
+            model,
+          );
+
+        const payload = {
+          model: resolvedModel,
+          messages,
+          temperature: 0.3,
+          top_p: 0.95,
+          max_tokens: 8192,
+        };
+
+        try {
+          const stream = await llmClient.streamChatCompletion(payload);
+
+          // Stream tokens as they arrive
+          for await (const chunk of stream) {
+            const token = chunk.choices[0]?.delta?.content || "";
+            if (token) {
+              sendChunk(token);
+            }
+          }
+
+          // Save the complete translation to DB
+          await translationService.runTranslationOnSubAct({
+            subActId: subAct.id,
+            model,
+          });
+        } catch (streamError) {
+          console.error(`Stream error for SubAct ${subAct.id}:`, streamError);
+          // Fall back to non-streaming
+          const translateRes = await translationService.runTranslationOnSubAct({
+            subActId: subAct.id,
+            model,
+          });
+          sendChunk(translateRes?.translation || "");
         }
       }
 

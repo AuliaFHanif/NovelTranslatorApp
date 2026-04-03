@@ -414,7 +414,7 @@ ONOMATOPOEIA RULES:
       messages,
       temperature: temperature ?? 0.3,
       top_p: top_p ?? 0.95,
-      max_tokens: max_tokens ?? 8192,
+      max_tokens: max_tokens ?? 12000,
     };
 
     const content = await llmClient.chatCompletion(payload);

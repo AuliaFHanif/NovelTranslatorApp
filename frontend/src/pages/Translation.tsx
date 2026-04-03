@@ -248,19 +248,18 @@ export function Translation() {
       setIsRunningPass(true);
       setEditableTranslation(""); // Clear before streaming
 
-      // If selected item is a SubAct, find its parent Act
-      let actIdToUse = selectedAct.id;
+      // If selected item is a SubAct, use that directly; otherwise use Act's SubActs
+      let url: string;
       const isSubAct = selectedAct.actId !== undefined;
+
       if (isSubAct) {
-        const parentAct = acts.find((act) =>
-          act.SubActs?.some((subAct) => subAct.id === selectedAct.id),
-        );
-        if (parentAct) {
-          actIdToUse = parentAct.id;
-        }
+        // Translate only this specific SubAct
+        url = `${API_BASE_URL}/translation/subacts/${selectedAct.id}/stream?model=${encodeURIComponent(modelName)}&pass=${pass}`;
+      } else {
+        // Translate all SubActs of this Act
+        url = `${API_BASE_URL}/translation/acts/${selectedAct.id}/stream?model=${encodeURIComponent(modelName)}&pass=${pass}`;
       }
 
-      const url = `${API_BASE_URL}/translation/acts/${actIdToUse}/stream?model=${encodeURIComponent(modelName)}&pass=${pass}`;
       const response = await fetch(url, { method: "POST" });
 
       if (!response.ok) {
@@ -269,12 +268,22 @@ export function Translation() {
 
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
+      let streamCompleted = false;
+      let hadError = false;
 
       if (reader) {
         try {
           while (true) {
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done) {
+              // Stream ended - check if we got [DONE] signal
+              if (!streamCompleted) {
+                console.warn(
+                  "Stream ended without [DONE] signal - connection may have been lost",
+                );
+              }
+              break;
+            }
 
             const chunk = decoder.decode(value, { stream: true });
             const lines = chunk.split("\n");
@@ -282,15 +291,37 @@ export function Translation() {
             for (const line of lines) {
               if (line.startsWith("data: ")) {
                 const dataStr = line.slice(6).trim();
-                if (dataStr === "[DONE]") continue;
+
+                // Check for completion signal
+                if (dataStr === "[DONE]") {
+                  streamCompleted = true;
+                  continue;
+                }
 
                 try {
                   const data = JSON.parse(dataStr);
+
+                  // Check for error messages in the content
+                  if (data.content && data.content.startsWith("ERROR:")) {
+                    hadError = true;
+                    const errorMsg = data.content.substring(6).trim();
+                    console.error("Stream error:", errorMsg);
+                    throw new Error(`LM Studio error: ${errorMsg}`);
+                  }
+
                   if (data.content) {
                     setEditableTranslation((prev) => prev + data.content);
                   }
                 } catch (e) {
-                  // Partial chunk
+                  // If it's our thrown error, re-throw it
+                  if (
+                    e instanceof Error &&
+                    e.message.startsWith("LM Studio error:")
+                  ) {
+                    throw e;
+                  }
+                  // Otherwise just log parse errors
+                  console.debug("Parse error on chunk:", dataStr, e);
                 }
               }
             }
@@ -298,6 +329,13 @@ export function Translation() {
         } finally {
           reader.releaseLock();
         }
+      }
+
+      // Throw error if stream didn't complete properly
+      if (!streamCompleted && !hadError) {
+        throw new Error(
+          "Stream interrupted. The LM Studio server may have stopped or connection was lost.",
+        );
       }
 
       await loadTranslationChapter();
@@ -1308,7 +1346,7 @@ export function Translation() {
             </div>
 
             {/* Sub-panel: Polish Selector */}
-            <div className="flex-[0.5] flex flex-col border-t border-[#d8cdbd] bg-[#f9f7f4] min-h-0 p-4 overflow-y-auto">
+            <div className="flex-0 max-h-[180px] flex flex-col border-t border-[#d8cdbd] bg-[#f9f7f4] min-h-0 p-4 overflow-y-auto">
               {selectedAct ? (
                 <PolishSelector
                   actPolishes={actPolishes}
