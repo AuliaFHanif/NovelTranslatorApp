@@ -1,5 +1,5 @@
 const { 
-  combinedAnalysis, 
+  analysisService, 
   glossaryProcessing, 
   strategyGenerator 
 } = require('../services');
@@ -57,37 +57,36 @@ describe('Phase 3 with New Schema', () => {
     act.Chapter = chapter;
     chapter.Series = series;
 
-    const stats = await glossaryProcessing.processTerms(extractedTerms, act);
+    const { candidates, approvedCount } = await glossaryProcessing.identifyTerms(extractedTerms, act);
 
-    expect(stats.created).toBe(1);
-    expect(stats.appearances).toBe(1);
-
-    // Verify linking table record
-    const appearance = await TermAppearance.findOne({
-      where: { actId: act.id }
-    });
-
-    expect(appearance).toBeTruthy();
-    expect(appearance.contextSentence).toBe('山田太郎が登場した。');
-
-    // Verify term created
-    const term = await GlossaryTerm.findByPk(appearance.termId);
-    expect(term.canonicalForm).toBe('山田太郎');
-    expect(term.status).toBe('pending');
+    // Initial pass: no terms approved yet, so it should be a candidate
+    expect(candidates.length).toBe(1);
+    expect(approvedCount).toBe(0);
+    expect(candidates[0].term).toBe('山田太郎');
   });
 
   test('merges duplicate terms', async () => {
     act.Chapter = chapter;
     chapter.Series = series;
 
-    // First appearance
-    await glossaryProcessing.processTerms([{
+    // First appearance as candidate
+    await glossaryProcessing.identifyTerms([{
       term: '山田太郎',
       type: 'character',
       context: 'First appearance.',
       proposedTranslation: 'Yamada Taro',
       confidence: 0.9
     }], act);
+
+    // Approve the term manually to test merging
+    const term = await GlossaryTerm.create({
+      seriesId: series.id,
+      canonicalForm: '山田太郎',
+      termJa: '山田太郎',
+      termEn: 'Yamada Taro',
+      type: 'character',
+      status: 'approved'
+    });
 
     // Second appearance in different act
     const act2 = await Act.create({
@@ -98,8 +97,9 @@ describe('Phase 3 with New Schema', () => {
     });
     
     act2.Chapter = chapter;
+    act2.Chapter.Series = series;
 
-    const stats = await glossaryProcessing.processTerms([{
+    const { candidates, approvedCount } = await glossaryProcessing.identifyTerms([{
       term: '山田太郎',
       type: 'character',
       context: 'Second appearance.',
@@ -107,11 +107,12 @@ describe('Phase 3 with New Schema', () => {
       confidence: 0.95
     }], act2);
 
-    expect(stats.merged).toBe(1);
+    expect(approvedCount).toBe(1);
+    expect(candidates.length).toBe(0);
 
-    // Should have 2 appearances
-    const appearances = await TermAppearance.findAll();
-    expect(appearances.length).toBe(2);
+    // Should have recorded appearance for approved term
+    const appearances = await TermAppearance.findAll({ where: { termId: term.id } });
+    expect(appearances.length).toBe(1);
   });
 
   test('generates act strategy from analysis', () => {

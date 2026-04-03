@@ -1,328 +1,562 @@
 /**
  * JSON schemas for OpenAI/LM Studio structured output
- * Different schemas for Japanese vs Chinese analysis
+ * Split into Term Extraction and Narrative Analysis passes
  */
 
-const japaneseSchema = {
-  type: 'json_schema',
+// --- TERM EXTRACTION PASS 1: Characters ---
+const characterSchema = {
+  type: "json_schema",
   json_schema: {
-    name: 'japanese_literary_analysis',
+    name: "character_extraction",
     strict: true,
     schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        // GLOSSARY EXTRACTION
         extractedTerms: {
-          type: 'array',
+          type: "array",
           items: {
-            type: 'object',
+            type: "object",
             properties: {
-              term: { type: 'string' },
-              type: { enum: ['character', 'location', 'organization', 'item', 'concept', 'technique'] },
-              context: { type: 'string' },
-              proposedTranslation: { type: 'string' },
-              confidence: { type: 'number', minimum: 0, maximum: 1 }
+              term: { type: "string" },
+              type: { enum: ["character"] },
+              context: { type: "string" },
+              proposedTranslation: { type: "string" },
+              confidence: { type: "number", minimum: 0, maximum: 1 },
             },
-            required: ['term', 'type', 'context', 'proposedTranslation']
-          }
+            required: ["term", "type", "context", "proposedTranslation"],
+          },
         },
+      },
+      required: ["extractedTerms"],
+    },
+  },
+};
 
-        // JAPANESE LINGUISTIC ANALYSIS
+// --- TERM EXTRACTION PASS 2: Locations & Organizations ---
+const locationOrgSchema = {
+  type: "json_schema",
+  json_schema: {
+    name: "location_org_extraction",
+    strict: true,
+    schema: {
+      type: "object",
+      properties: {
+        extractedTerms: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              term: { type: "string" },
+              type: { enum: ["location", "organization"] },
+              context: { type: "string" },
+              proposedTranslation: { type: "string" },
+              confidence: { type: "number", minimum: 0, maximum: 1 },
+            },
+            required: ["term", "type", "context", "proposedTranslation"],
+          },
+        },
+      },
+      required: ["extractedTerms"],
+    },
+  },
+};
+
+// --- TERM EXTRACTION PASS 3: Items, Concepts, Techniques ---
+const itemConceptTechniqueSchema = {
+  type: "json_schema",
+  json_schema: {
+    name: "item_concept_technique_extraction",
+    strict: true,
+    schema: {
+      type: "object",
+      properties: {
+        extractedTerms: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              term: { type: "string" },
+              type: { enum: ["item", "concept", "technique"] },
+              context: { type: "string" },
+              proposedTranslation: { type: "string" },
+              confidence: { type: "number", minimum: 0, maximum: 1 },
+            },
+            required: ["term", "type", "context", "proposedTranslation"],
+          },
+        },
+      },
+      required: ["extractedTerms"],
+    },
+  },
+};
+
+// --- JAPANESE NARRATIVE ANALYSIS ---
+const japaneseNarrativeSchema = {
+  type: "json_schema",
+  json_schema: {
+    name: "japanese_narrative_analysis",
+    strict: true,
+    schema: {
+      type: "object",
+      properties: {
         linguisticAnalysis: {
-          type: 'object',
+          type: "object",
           properties: {
-            language: { const: 'ja' },
-            sentenceStructure: { enum: ['SOV', 'SVO', 'mixed'] },
+            language: { const: "ja" },
+            sentenceStructure: { enum: ["SOV", "SVO", "mixed"] },
 
             proDrop: {
-              type: 'object',
+              type: "object",
               properties: {
-                frequency: { type: 'number', minimum: 0, maximum: 1 },
-                agentOmission: { type: 'boolean' },
-                examples: { type: 'array', items: { type: 'string' } }
-              }
+                frequency: { type: "number", minimum: 0, maximum: 1 },
+                agentOmission: { type: "boolean" },
+                examples: { type: "array", items: { type: "string" } },
+              },
+              required: ["frequency", "agentOmission", "examples"],
             },
 
             onomatopoeia: {
-              type: 'object',
+              type: "object",
               properties: {
                 gitaigo: {
-                  type: 'array',
+                  type: "array",
                   items: {
-                    type: 'object',
+                    type: "object",
                     properties: {
-                      term: { type: 'string' },
-                      meaning: { type: 'string' },
-                      context: { type: 'string' },
-                      emotionalWeight: { enum: ['neutral', 'negative', 'positive'] }
-                    }
-                  }
+                      term: { type: "string" },
+                      meaning: { type: "string" },
+                      context: { type: "string" },
+                      emotionalWeight: {
+                        enum: ["neutral", "negative", "positive"],
+                      },
+                    },
+                  },
                 },
                 giseigo: {
-                  type: 'array',
+                  type: "array",
                   items: {
-                    type: 'object',
+                    type: "object",
                     properties: {
-                      term: { type: 'string' },
-                      meaning: { type: 'string' },
-                      context: { type: 'string' }
-                    }
-                  }
+                      term: { type: "string" },
+                      meaning: { type: "string" },
+                      context: { type: "string" },
+                    },
+                  },
                 },
-                density: { enum: ['none', 'low', 'medium', 'high'] }
-              }
+                density: { enum: ["none", "low", "medium", "high"] },
+              },
             },
 
             honorifics: {
-              type: 'object',
+              type: "object",
               properties: {
-                system: { const: 'keigo' },
-                types: { type: 'array', items: { type: 'string' } },
-                statusMarkers: { type: 'array', items: { type: 'string' } },
-                hierarchicalLanguage: { type: 'boolean' },
-                density: { enum: ['none', 'low', 'medium', 'high'] }
-              }
+                system: { const: "keigo" },
+                types: { type: "array", items: { type: "string" } },
+                statusMarkers: { type: "array", items: { type: "string" } },
+                hierarchicalLanguage: { type: "boolean" },
+                density: { enum: ["none", "low", "medium", "high"] },
+              },
             },
 
             taigenTome: {
-              type: 'object',
+              type: "object",
               properties: {
-                count: { type: 'integer' },
-                examples: { type: 'array', items: { type: 'string' } },
-                emotionalFunction: { enum: ['objectification', 'suspense', 'emphasis', 'freeze_frame'] }
-              }
+                count: { type: "integer" },
+                examples: { type: "array", items: { type: "string" } },
+                emotionalFunction: {
+                  enum: [
+                    "objectification",
+                    "suspense",
+                    "emphasis",
+                    "freeze_frame",
+                  ],
+                },
+              },
             },
 
             sentenceEndingParticles: {
-              type: 'array',
+              type: "array",
               items: {
-                type: 'object',
+                type: "object",
                 properties: {
-                  particle: { type: 'string' },
-                  frequency: { type: 'integer' },
-                  genderTone: { enum: ['feminine', 'masculine', 'neutral', 'archaic'] }
-                }
-              }
+                  particle: { type: "string" },
+                  frequency: { type: "integer" },
+                  genderTone: {
+                    enum: ["feminine", "masculine", "neutral", "archaic"],
+                  },
+                },
+              },
             },
 
             internalMonologue: {
-              type: 'object',
+              type: "object",
               properties: {
-                format: { enum: ['maru_kakko', 'kagi_kakko', 'none'] },
-                ratio: { type: 'number', minimum: 0, maximum: 1 },
-                closeness: { enum: ['distant', 'close', 'intimate'] }
-              }
-            }
+                format: { enum: ["maru_kakko", "kagi_kakko", "none"] },
+                ratio: { type: "number", minimum: 0, maximum: 1 },
+                closeness: { enum: ["distant", "close", "intimate"] },
+              },
+            },
           },
-          required: ['language', 'sentenceStructure', 'onomatopoeia', 'honorifics']
+          required: [
+            "language",
+            "sentenceStructure",
+            "onomatopoeia",
+            "honorifics",
+            "proDrop",
+          ],
         },
 
-        // NARRATIVE ANALYSIS
         narrativeAnalysis: {
-          type: 'object',
+          type: "object",
           properties: {
             kokyu: {
-              type: 'object',
+              type: "object",
               properties: {
-                pattern: { enum: ['suspense_building', 'quick_burst', 'lingering', 'staccato'] },
-                avgSentenceLength: { type: 'integer' },
-                subordinateClauses: { type: 'number' }
-              }
+                pattern: {
+                  enum: [
+                    "suspense_building",
+                    "quick_burst",
+                    "lingering",
+                    "staccato",
+                  ],
+                },
+                avgSentenceLength: { type: "integer" },
+                subordinateClauses: { type: "number" },
+              },
+              required: ["pattern", "avgSentenceLength"],
             },
 
             emotionalTone: {
-              type: 'object',
+              type: "object",
               properties: {
-                primary: { type: 'string' },
-                intensity: { type: 'number', minimum: 0, maximum: 1 },
-                enryo: { type: 'boolean' },
-                amae: { type: 'boolean' }
-              }
+                primary: { type: "string" },
+                intensity: { type: "number", minimum: 0, maximum: 1 },
+                enryo: { type: "boolean" },
+                amae: { type: "boolean" },
+              },
+              required: ["primary", "intensity", "enryo", "amae"],
             },
 
             powerDynamic: {
-              type: 'object',
+              type: "object",
               properties: {
-                type: { enum: ['sempai_kohai', 'master_servant', 'family', 'romantic', 'none'] },
-                explicitness: { enum: ['explicit', 'implicit', 'contextual'] }
-              }
+                type: {
+                  enum: [
+                    "sempai_kohai",
+                    "master_servant",
+                    "family",
+                    "romantic",
+                    "none",
+                  ],
+                },
+                explicitness: { enum: ["explicit", "implicit", "contextual"] },
+              },
             },
 
-            pacingPattern: { enum: ['kuai', 'man', 'mixed'] },
-            emotionalIntensity: { type: 'number', minimum: 0, maximum: 1 },
-            primaryEmotion: { type: 'string' }
+            pacingPattern: { enum: ["kuai", "man", "mixed"] },
+            emotionalIntensity: { type: "number", minimum: 0, maximum: 1 },
+            primaryEmotion: { type: "string" },
           },
-          required: ['pacingPattern', 'emotionalIntensity', 'primaryEmotion', 'emotionalTone']
-        }
+          required: [
+            "pacingPattern",
+            "emotionalIntensity",
+            "primaryEmotion",
+            "emotionalTone",
+            "kokyu",
+          ],
+        },
       },
-      required: ['extractedTerms', 'linguisticAnalysis', 'narrativeAnalysis']
-    }
-  }
+      required: ["linguisticAnalysis", "narrativeAnalysis"],
+    },
+  },
 };
 
-const chineseSchema = {
-  type: 'json_schema',
+// --- CHINESE NARRATIVE ANALYSIS ---
+const chineseNarrativeSchema = {
+  type: "json_schema",
   json_schema: {
-    name: 'chinese_literary_analysis',
+    name: "chinese_narrative_analysis",
     strict: true,
     schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        extractedTerms: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              term: { type: 'string' },
-              type: { enum: ['character', 'location', 'organization', 'item', 'concept', 'technique'] },
-              context: { type: 'string' },
-              proposedTranslation: { type: 'string' },
-              confidence: { type: 'number', minimum: 0, maximum: 1 }
-            },
-            required: ['term', 'type', 'context', 'proposedTranslation']
-          }
-        },
-
         linguisticAnalysis: {
-          type: 'object',
+          type: "object",
           properties: {
-            language: { const: 'zh' },
-            sentenceStructure: { enum: ['Topic-Comment', 'SVO', 'classical'] },
+            language: { const: "zh" },
+            sentenceStructure: { enum: ["Topic-Comment", "SVO", "classical"] },
 
             topicProminence: {
-              type: 'object',
+              type: "object",
               properties: {
-                frequency: { type: 'number', minimum: 0, maximum: 1 },
-                examples: { type: 'array', items: { type: 'string' } }
-              }
+                frequency: { type: "number", minimum: 0, maximum: 1 },
+                examples: { type: "array", items: { type: "string" } },
+              },
+              required: ["frequency", "examples"],
             },
 
             fourCharacterIdioms: {
-              type: 'array',
+              type: "array",
               items: {
-                type: 'object',
+                type: "object",
                 properties: {
-                  idiom: { type: 'string' },
-                  literalMeaning: { type: 'string' },
-                  contextualMeaning: { type: 'string' },
-                  preserve: { type: 'boolean' }
-                }
-              }
+                  idiom: { type: "string" },
+                  literalMeaning: { type: "string" },
+                  contextualMeaning: { type: "string" },
+                  preserve: { type: "boolean" },
+                },
+                required: [
+                  "idiom",
+                  "literalMeaning",
+                  "contextualMeaning",
+                  "preserve",
+                ],
+              },
             },
 
             onomatopoeia: {
-              type: 'object',
+              type: "object",
               properties: {
                 types: {
-                  type: 'array',
+                  type: "array",
                   items: {
-                    type: 'object',
+                    type: "object",
                     properties: {
-                      term: { type: 'string' },
-                      pinyin: { type: 'string' },
-                      category: { enum: ['sound', 'motion', 'emotion'] }
-                    }
-                  }
+                      term: { type: "string" },
+                      pinyin: { type: "string" },
+                      category: { enum: ["sound", "motion", "emotion"] },
+                    },
+                  },
                 },
-                density: { enum: ['none', 'low', 'medium', 'high'] }
-              }
+                density: { enum: ["none", "low", "medium", "high"] },
+              },
             },
 
             statusLanguage: {
-              type: 'object',
+              type: "object",
               properties: {
-                selfDeprecating: { type: 'array', items: { type: 'string' } },
-                elevatingOther: { type: 'array', items: { type: 'string' } },
-                arrogant: { type: 'array', items: { type: 'string' } }
-              }
+                selfDeprecating: { type: "array", items: { type: "string" } },
+                elevatingOther: { type: "array", items: { type: "string" } },
+                arrogant: { type: "array", items: { type: "string" } },
+              },
             },
 
             rhetoricalDevices: {
-              type: 'object',
+              type: "object",
               properties: {
-                parallelism: { type: 'boolean' },
-                antithesis: { type: 'boolean' },
-                exaggeration: { type: 'boolean' }
-              }
-            }
+                parallelism: { type: "boolean" },
+                antithesis: { type: "boolean" },
+                exaggeration: { type: "boolean" },
+              },
+            },
           },
-          required: ['language', 'sentenceStructure', 'onomatopoeia']
+          required: [
+            "language",
+            "sentenceStructure",
+            "onomatopoeia",
+            "topicProminence",
+          ],
         },
 
         narrativeAnalysis: {
-          type: 'object',
+          type: "object",
           properties: {
             kuaiMan: {
-              type: 'object',
+              type: "object",
               properties: {
-                dominantPattern: { enum: ['kuai', 'man', 'alternating'] },
-                kuaiTriggers: { type: 'array', items: { type: 'string' } },
-                manTriggers: { type: 'array', items: { type: 'string' } }
-              }
+                dominantPattern: { enum: ["kuai", "man", "alternating"] },
+                kuaiTriggers: { type: "array", items: { type: "string" } },
+                manTriggers: { type: "array", items: { type: "string" } },
+              },
+              required: ["dominantPattern", "kuaiTriggers", "manTriggers"],
             },
 
             faceSystem: {
-              type: 'object',
+              type: "object",
               properties: {
-                faceThreatPresent: { type: 'boolean' },
+                faceThreatPresent: { type: "boolean" },
                 lossOfFaceEvents: {
-                  type: 'array',
+                  type: "array",
                   items: {
-                    type: 'object',
+                    type: "object",
                     properties: {
-                      type: { enum: ['public_shame', 'defeat', 'betrayal', 'humiliation'] },
-                      severity: { enum: ['minor', 'moderate', 'severe'] },
+                      type: {
+                        enum: [
+                          "public_shame",
+                          "defeat",
+                          "betrayal",
+                          "humiliation",
+                        ],
+                      },
+                      severity: { enum: ["minor", "moderate", "severe"] },
                       physiologicalMarkers: {
-                        type: 'array',
-                        items: { enum: ['coughing_blood', 'sucking_cold_air', 'pale_face', 'trembling_hands', 'spitting_blood'] }
-                      }
-                    }
-                  }
-                }
-              }
+                        type: "array",
+                        items: {
+                          enum: [
+                            "coughing_blood",
+                            "sucking_cold_air",
+                            "pale_face",
+                            "trembling_hands",
+                            "spitting_blood",
+                          ],
+                        },
+                      },
+                    },
+                  },
+                },
+              },
             },
 
             filialPiety: {
-              type: 'object',
+              type: "object",
               properties: {
-                present: { type: 'boolean' },
-                relationshipType: { enum: ['shifu_disciple', 'parent_child', 'emperor_subject', 'sect_leader_member', 'none'] },
-                twisted: { type: 'boolean' },
-                obedienceLevel: { enum: ['willing', 'coerced', 'brainwashed', 'rebellious'] }
-              }
+                present: { type: "boolean" },
+                relationshipType: {
+                  enum: [
+                    "shifu_disciple",
+                    "parent_child",
+                    "emperor_subject",
+                    "sect_leader_member",
+                    "none",
+                  ],
+                },
+                twisted: { type: "boolean" },
+                obedienceLevel: {
+                  enum: ["willing", "coerced", "brainwashed", "rebellious"],
+                },
+              },
             },
 
             jianghu: {
-              type: 'object',
+              type: "object",
               properties: {
-                present: { type: 'boolean' },
-                martialArtsTerms: { type: 'array', items: { type: 'string' } },
-                cultivationStages: { type: 'array', items: { type: 'string' } }
-              }
+                present: { type: "boolean" },
+                martialArtsTerms: { type: "array", items: { type: "string" } },
+                cultivationStages: { type: "array", items: { type: "string" } },
+              },
             },
 
             emotionalExpression: {
-              type: 'object',
+              type: "object",
               properties: {
-                directness: { enum: ['direct', 'implied', 'physiological'] },
-                primary: { type: 'string' },
-                intensity: { type: 'number', minimum: 0, maximum: 1 }
-              }
+                directness: { enum: ["direct", "implied", "physiological"] },
+                primary: { type: "string" },
+                intensity: { type: "number", minimum: 0, maximum: 1 },
+              },
+              required: ["directness", "primary", "intensity"],
             },
 
-            pacingPattern: { enum: ['kuai', 'man', 'mixed'] },
-            emotionalIntensity: { type: 'number', minimum: 0, maximum: 1 },
-            primaryEmotion: { type: 'string' }
+            pacingPattern: { enum: ["kuai", "man", "mixed"] },
+            emotionalIntensity: { type: "number", minimum: 0, maximum: 1 },
+            primaryEmotion: { type: "string" },
           },
-          required: ['pacingPattern', 'emotionalIntensity', 'primaryEmotion', 'faceSystem']
-        }
+          required: [
+            "pacingPattern",
+            "emotionalIntensity",
+            "primaryEmotion",
+            "faceSystem",
+            "kuaiMan",
+            "emotionalExpression",
+          ],
+        },
       },
-      required: ['extractedTerms', 'linguisticAnalysis', 'narrativeAnalysis']
-    }
-  }
+      required: ["linguisticAnalysis", "narrativeAnalysis"],
+    },
+  },
+};
+
+// --- UNIFIED TERM EXTRACTION (OPTIMIZED SINGLE PASS) ---
+const unifiedTermExtractionSchema = {
+  type: "json_schema",
+  json_schema: {
+    name: "unified_term_extraction",
+    strict: true,
+    schema: {
+      type: "object",
+      properties: {
+        extractedTerms: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              term: { type: "string" },
+              type: {
+                enum: [
+                  "character",
+                  "location",
+                  "organization",
+                  "item",
+                  "concept",
+                  "technique",
+                ],
+              },
+              context: { type: "string" },
+              proposedTranslation: { type: "string" },
+              confidence: { type: "number", minimum: 0, maximum: 1 },
+            },
+            required: [
+              "term",
+              "type",
+              "context",
+              "proposedTranslation",
+              "confidence",
+            ],
+          },
+        },
+      },
+      required: ["extractedTerms"],
+    },
+  },
+};
+
+const polishSchema = {
+  type: "json_schema",
+  json_schema: {
+    name: "translation_polish_edits",
+    strict: true,
+    schema: {
+      type: "object",
+      properties: {
+        edits: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              original: {
+                type: "string",
+                description:
+                  "The EXACT word or phrase from the current English translation to be replaced.",
+              },
+              replacement: {
+                type: "string",
+                description:
+                  "The updated, refined, or modernized version of that word or phrase.",
+              },
+              reason: {
+                type: "string",
+                description:
+                  'Why this edit is being made (e.g., "modernizing idiom", "improving flow").',
+              },
+            },
+            required: ["original", "replacement", "reason"],
+          },
+        },
+      },
+      required: ["edits"],
+    },
+  },
 };
 
 module.exports = {
-  ja: japaneseSchema,
-  zh: chineseSchema
+  terms: {
+    character: characterSchema,
+    locationOrg: locationOrgSchema,
+    itemConceptTechnique: itemConceptTechniqueSchema,
+    unified: unifiedTermExtractionSchema,
+  },
+  narrative: {
+    ja: japaneseNarrativeSchema,
+    zh: chineseNarrativeSchema,
+  },
+  polish: polishSchema,
 };

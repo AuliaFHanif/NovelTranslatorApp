@@ -20,6 +20,10 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         unique: true,
       },
+      purpose: {
+        type: DataTypes.ENUM('segmentation', 'translation', 'analysis', 'polish'),
+        allowNull: true,
+      },
       modelId: {
         type: DataTypes.STRING,
         allowNull: false,

@@ -1,739 +1,694 @@
 const express = require("express");
-const axios = require("axios");
-const { Act, Chapter, Series, GlossaryTerm } = require("../models");
+const {
+  Act,
+  SubAct,
+  Chapter,
+  Series,
+  GlossaryTerm,
+  Analysis,
+  Polish,
+  TermAppearance,
+} = require("../models");
+
 const { Op } = require("sequelize");
-const { resolveModel } = require("../services/resolveModel");
+const translationService = require("../services/translationService");
+const polishService = require("../services/polishService");
+const llmClient = require("../services/llmClient");
+const { extractJson } = require("../services/utils");
 
 const router = express.Router();
 
-const LM_STUDIO_URL = process.env.LM_STUDIO_URL || "http://localhost:1234";
-const LM_STUDIO_CHAT_ENDPOINT = `${LM_STUDIO_URL}/v1/chat/completions`;
-
-function parsePass(value) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 3) {
-    return null;
-  }
-  return parsed;
-}
-
-function canRunPass() {
-  return { ok: true };
-}
-
-function buildTranslationPrompt(
-  { language, rawActText, glossaryText, analysisContext },
-) {
-  const languageName = language === "ja" ? "Japanese" : "Chinese";
-
-  const userParts = [
-    `Source language: ${languageName}`,
-  ];
-
-  if (glossaryText) {
-    userParts.push(`Glossary (use these translations for names/terms):\n${glossaryText}`);
-  }
-
-  if (analysisContext) {
-    userParts.push(`Literary analysis context:\n${analysisContext}`);
-  }
-
-  userParts.push(
-    "Task: Translate the following text into natural, faithful English. Preserve character voice, narrative tone, cultural nuance, and proper names. Return only the translated text.",
-    "Source text:",
-    rawActText,
-  );
-
-  return [
-    {
-      role: "system",
-      content:
-        "You are an expert literary translator specializing in translating web novels. Produce faithful, natural English translations that preserve the author's voice, tone, and style.",
-    },
-    {
-      role: "user",
-      content: userParts.join("\n\n"),
-    },
-  ];
-}
-
-function formatGlossary(entries, language) {
-  if (!entries.length) {
-    return "";
-  }
-
-  const termField = language === "ja" ? "termJa" : "termZh";
-  return entries
-    .map((entry) => {
-      const sourceTerm =
-        entry[termField] ||
-        entry.canonicalForm ||
-        "(no source term)";
-      const englishTerm = entry.termEn || "(no English term)";
-      const typePrefix = entry.type ? `[${entry.type.toUpperCase()}] ` : "";
-      const definition = entry.definition ? ` - ${entry.definition}` : "";
-      return `- ${typePrefix}${sourceTerm} => ${englishTerm}${definition}`;
-    })
-    .join("\n");
-}
-
-async function collectGlossaryForAct(chapter, act) {
-  // 1. Get terms specifically linked to this act via Phase 3 analysis (TermAppearances)
-  const linkedApproved = await act.getGlossaryTerms({
-    where: { status: "approved" },
-    order: [["updatedAt", "DESC"]],
-  });
-
-  // 2. Fallback/Supplemental: Get all other approved terms for the series and scan for them
-  // This catches terms added to glossary AFTER the analysis pass
-  const allApproved = await GlossaryTerm.findAll({
-    where: {
-      seriesId: chapter.seriesId,
-      status: "approved",
-      id: { [Op.notIn]: linkedApproved.map(t => t.id) }
-    },
-  });
-
-  if (!act.rawText) {
-    return linkedApproved;
-  }
-
-  const termField = chapter.Series?.language === "ja" ? "termJa" : "termZh";
-  const manualScanMatches = allApproved.filter(term => {
-    // Check all possible forms: field specific, canonical, and variants
-    const forms = [
-      term[termField],
-      term.canonicalForm,
-      ...(term.metadata?.variants || [])
-    ].filter(Boolean);
-    
-    return forms.some(form => act.rawText.includes(form));
-  });
-
-  // Combine both sets
-  return [...linkedApproved, ...manualScanMatches];
-}
-
-async function aggregateChapterFinalText(chapterId) {
-  const acts = await Act.findAll({
-    where: { chapterId },
-    order: [["sequence", "ASC"]],
-  });
-
-  const cleanedTexts = acts.map((act) => {
-    // Priority: 1. translatedText (user manual save or P3 output)
-    //           2. anatomyProfile.finalTranslation (legacy/internal)
-    let text = act.translatedText || act.anatomyProfile?.finalTranslation || "";
-    
-    // Strip <think>...</think> or Thinking Process: ... </think> blocks
-    let cleaned = text.replace(/(?:<think>|Thinking Process:)[\s\S]*?<\/think>/g, "").trim();
-    
-    // Handle orphaned </think> (where the AI starts thinking without an opening tag/phrase)
-    if (cleaned.includes("</think>")) {
-      cleaned = cleaned.split("</think>").pop().trim();
-    }
-    
-    return cleaned;
-  }).filter(Boolean);
-
-  const finalText = cleanedTexts.join("\n\n");
-
-  const chapter = await Chapter.findByPk(chapterId);
-  if (!chapter) {
-    return null;
-  }
-
-  chapter.finalText = finalText || null;
-  
-  // If we have text for all acts, set status to complete
-  if (acts.length > 0 && cleanedTexts.length === acts.length) {
-    chapter.status = "complete";
-  } else if (cleanedTexts.length > 0) {
-    chapter.status = "ready";
-  }
-
-  await chapter.save();
-  return chapter;
-}
-
-async function prepareActTranslationContext(act, model) {
-  const chapter = await Chapter.findByPk(act.chapterId, {
-    include: [{ model: Series, as: 'Series', attributes: ["id", "language", "title"] }],
-  });
-
-  if (!chapter) {
-    throw new Error(`Chapter ${act.chapterId} not found`);
-  }
-
-  const glossaryEntries = await collectGlossaryForAct(chapter, act);
-  const glossaryText = formatGlossary(glossaryEntries, chapter.Series.language);
-
-  // EXPLICIT ACT CONTEXT
-  let analysisContext = `Current Position: Chapter ${chapter.number} | Act ${act.sequence} - ${act.label}`;
-  
-  const linguistic = act.anatomyProfile?.linguistic;
-  const narrative = act.anatomyProfile?.narrative;
-  if (linguistic || narrative) {
-    const parts = [];
-    if (narrative?.primaryEmotion) parts.push(`Primary emotion: ${narrative.primaryEmotion}`);
-    if (narrative?.emotionalIntensity) parts.push(`Emotional intensity: ${narrative.emotionalIntensity}`);
-    if (narrative?.pacingPattern) parts.push(`Pacing: ${narrative.pacingPattern}`);
-    if (linguistic?.sentenceStructure) parts.push(`Sentence structure: ${linguistic.sentenceStructure}`);
-    if (linguistic?.honorifics?.density) parts.push(`Honorific density: ${linguistic.honorifics.density}`);
-    if (linguistic?.onomatopoeia?.density) parts.push(`Onomatopoeia density: ${linguistic.onomatopoeia.density}`);
-    if (narrative?.emotionalTone?.enryo) parts.push("Enryo (restraint/reserve) present");
-    if (narrative?.emotionalTone?.amae) parts.push("Amae (dependence/indulgence) present");
-    if (parts.length > 0) analysisContext += "\n\n" + parts.join("\n");
-  }
-
-  const messages = buildTranslationPrompt({
-    language: chapter.Series.language,
-    rawActText: act.rawText || "",
-    glossaryText,
-    analysisContext,
-  });
-
-  const resolvedModel = await resolveModel(model);
-  return { messages, resolvedModel, chapter };
-}
-
-async function runPassOnAct({
-  act,
-  pass,
-  force,
-  model,
-  temperature,
-  top_p,
-  max_tokens,
-}) {
-  const readiness = canRunPass(act, pass, force);
-  if (!readiness.ok) {
-    return { status: 409, body: { error: readiness.reason } };
-  }
-
-  let messages, resolvedModel, chapter;
-  try {
-    const context = await prepareActTranslationContext(act, model);
-    messages = context.messages;
-    resolvedModel = context.resolvedModel;
-    chapter = context.chapter;
-  } catch (err) {
-    return { status: 404, body: { error: err.message } };
-  }
-
-  const llmRequest = {
-    model: resolvedModel,
-    messages,
-    temperature: temperature ?? 0.4,
-    top_p: top_p ?? 0.9,
-    max_tokens: max_tokens ?? 16384,
-  };
-
-  let llmResponse;
-  try {
-    llmResponse = await axios.post(LM_STUDIO_CHAT_ENDPOINT, llmRequest, {
-      timeout: 900000,
-    });
-  } catch (error) {
-    if (error.code === "ECONNREFUSED") {
-      return {
-        status: 503,
-        body: {
-          error: "LM Studio service unavailable",
-          message: `Cannot connect to ${LM_STUDIO_URL}. Ensure LM Studio is running.`,
-        },
-      };
-    }
-
-    if (error.code === "ECONNABORTED") {
-      return {
-        status: 504,
-        body: {
-          error: "LM Studio request timeout",
-          message: "The translation request timed out.",
-        },
-      };
-    }
-
-    return {
-      status: error.response?.status || 500,
-      body: {
-        error: "LM Studio error",
-        details: error.response?.data || error.message,
-      },
-    };
-  }
-
-  const content = llmResponse.data?.choices?.[0]?.message?.content;
-  if (!content || typeof content !== "string") {
-    return {
-      status: 502,
-      body: {
-        error: "Invalid LLM response",
-        message: "No message content returned from LM Studio.",
-      },
-    };
-  }
-
-  const profile = act.anatomyProfile || {};
-  act.anatomyProfile = { ...profile, finalTranslation: content };
-  act.status = "ready";
-
-  act.lastRunAt = new Date();
-  act.llmMeta = {
-    ...(act.llmMeta || {}),
-    [`pass${pass}`]: {
-      model: llmRequest.model,
-      temperature: llmRequest.temperature,
-      top_p: llmRequest.top_p,
-      max_tokens: llmRequest.max_tokens,
-      ranAt: new Date().toISOString(),
-    },
-  };
-
-  await act.save();
-
-  await Chapter.update(
-    { status: "ready" },
-    { where: { id: act.chapterId } },
-  );
-
-  // await aggregateChapterFinalText(act.chapterId);
-
-  return {
-    status: 200,
-    body: {
-      success: true,
-      data: {
-        act,
-        pass,
-        output: content,
-      },
-    },
-  };
-}
-
+/**
+ * GET /api/translation/translate/:seriesId/chapter/:chapterId
+ * Get comprehensive chapter status for translation
+ */
 router.get("/translate/:seriesId/chapter/:chapterId", async (req, res) => {
   try {
-    const seriesId = Number(req.params.seriesId);
     const chapterId = Number(req.params.chapterId);
-    if (!Number.isInteger(seriesId) || seriesId < 1) {
-      return res.status(400).json({ error: "Invalid seriesId" });
-    }
-    if (!Number.isInteger(chapterId) || chapterId < 1) {
-      return res.status(400).json({ error: "Invalid chapterId" });
-    }
 
     const chapter = await Chapter.findByPk(chapterId, {
       include: [
-        { model: Series, as: 'Series', attributes: ["id", "title", "language", "genre"] },
+        { model: Series, as: "Series" },
+        {
+          model: Act,
+          as: "Acts",
+          include: [
+            { model: SubAct, as: "SubActs" },
+            { model: Analysis, as: "Analysis" },
+          ],
+        },
       ],
-    });
-
-    if (!chapter) {
-      return res.status(404).json({ error: `Chapter ${chapterId} not found` });
-    }
-
-    if (chapter.seriesId !== seriesId) {
-      return res
-        .status(403)
-        .json({ error: "Chapter does not belong to this series" });
-    }
-
-    const acts = await Act.findAll({
-      where: { chapterId },
       order: [
-        ["sequence", "ASC"]
+        [{ model: Act, as: "Acts" }, "sequence", "ASC"],
+        [
+          { model: Act, as: "Acts" },
+          { model: SubAct, as: "SubActs" },
+          "sequence",
+          "ASC",
+        ],
       ],
     });
 
-    const progress = {
-      totalActs: acts.length,
-      pass1Done: acts.length, // If acts exist, Architect is done
-      pass2Done: acts.filter((act) => Boolean(act.anatomyProfile?.linguistic)).length,
-      pass3Done: acts.filter((act) => Boolean(act.anatomyProfile?.finalTranslation)).length,
-    };
+    if (!chapter) return res.status(404).json({ error: "Chapter not found" });
+
+    // Calculate progress based on SubActs
+    let totalSubActs = 0;
+    let translatedSubActs = 0;
+    chapter.Acts.forEach((act) => {
+      totalSubActs += act.SubActs.length;
+      translatedSubActs += act.SubActs.filter((s) => !!s.translatedText).length;
+    });
+
+    const chapterJson = chapter.toJSON();
 
     res.status(200).json({
       success: true,
       data: {
-        chapter,
-        acts,
-        progress,
+        chapter: chapterJson,
+        acts: chapterJson.Acts || [],
+        progress: {
+          totalSubActs,
+          translatedSubActs,
+          percent:
+            totalSubActs > 0
+              ? ((translatedSubActs / totalSubActs) * 100).toFixed(1)
+              : 0,
+        },
       },
     });
   } catch (error) {
-    console.error(
-      "GET /api/translation/translate/:seriesId/chapter/:chapterId - Error:",
-      error.message,
-    );
     res.status(500).json({ error: error.message });
   }
 });
 
-router.post("/acts/:actId/pass", async (req, res) => {
+/**
+ * POST /api/translation/subacts/:subActId/translate
+ * Translate a single SubAct
+ */
+router.post("/subacts/:subActId/translate", async (req, res) => {
   try {
-    const actId = Number(req.params.actId);
-    const pass = parsePass(req.body.pass);
-    const force = Boolean(req.body.force);
+    const subActId = Number(req.params.subActId);
+    const { model, temperature } = req.body;
 
-    if (!Number.isInteger(actId) || actId < 1) {
-      return res.status(400).json({ error: "Invalid actId" });
-    }
-
-    if (!pass) {
-      return res.status(400).json({ error: "Pass must be 1, 2, or 3" });
-    }
-
-    const act = await Act.findByPk(actId);
-    if (!act) {
-      return res.status(404).json({ error: `Act ${actId} not found` });
-    }
-
-    const result = await runPassOnAct({
-      act,
-      pass,
-      force,
-      model: req.body.model,
-      temperature: req.body.temperature,
-      top_p: req.body.top_p,
-      max_tokens: req.body.max_tokens,
+    const result = await translationService.runTranslationOnSubAct({
+      subActId,
+      model,
+      temperature,
     });
 
-    res.status(result.status).json(result.body);
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
   } catch (error) {
-    console.error(
-      "POST /api/translation/acts/:actId/pass - Error:",
-      error.message,
-    );
     res.status(500).json({ error: error.message });
   }
 });
 
-router.post("/chapters/:chapterId/pass", async (req, res) => {
+/**
+ * POST /api/translation/chapters/:chapterId/translate
+ * Translate all SubActs in a chapter
+ */
+router.post("/chapters/:chapterId/translate", async (req, res) => {
   try {
     const chapterId = Number(req.params.chapterId);
-    const pass = parsePass(req.body.pass);
-    const force = Boolean(req.body.force);
-
-    if (!Number.isInteger(chapterId) || chapterId < 1) {
-      return res.status(400).json({ error: "Invalid chapterId" });
-    }
-
-    if (!pass) {
-      return res.status(400).json({ error: "Pass must be 1, 2, or 3" });
-    }
+    const { model } = req.body;
 
     const acts = await Act.findAll({
       where: { chapterId },
-      order: [
-        ["sequence", "ASC"]
-      ],
+      include: [{ model: SubAct, as: "SubActs" }],
+      order: [["sequence", "ASC"]],
     });
-
-    if (!acts.length) {
-      return res
-        .status(404)
-        .json({ error: `No acts found for chapter ${chapterId}` });
-    }
 
     const results = [];
     const failures = [];
 
     for (const act of acts) {
-      const result = await runPassOnAct({
-        act,
-        pass,
-        force,
-        model: req.body.model,
-        temperature: req.body.temperature,
-        top_p: req.body.top_p,
-        max_tokens: req.body.max_tokens,
-      });
-
-      if (result.status === 200) {
-        results.push(result.body.data);
-      } else {
-        failures.push({
-          actId: act.id,
-          status: result.status,
-          error: result.body.error || "Failed to run pass",
-          message: result.body.message,
-        });
+      // Sort subacts manually if include order failed or just to be safe
+      const sortedSubActs = act.SubActs.sort((a, b) => a.sequence - b.sequence);
+      for (const subAct of sortedSubActs) {
+        try {
+          const res = await translationService.runTranslationOnSubAct({
+            subActId: subAct.id,
+            model,
+          });
+          results.push(res);
+        } catch (err) {
+          failures.push({ subActId: subAct.id, error: err.message });
+        }
       }
     }
-
-    const refreshedActs = await Act.findAll({
-      where: { chapterId },
-      order: [
-        ["sequence", "ASC"]
-      ],
-    });
-
-    // if (failures.length === 0) {
-    //   await aggregateChapterFinalText(chapterId);
-    // }
 
     res.status(failures.length > 0 ? 207 : 200).json({
       success: failures.length === 0,
-      data: {
-        pass,
-        completed: results.length,
-        failed: failures.length,
-        failures,
-        acts: refreshedActs,
-      },
+      completed: results.length,
+      failed: failures.length,
+      failures,
     });
   } catch (error) {
-    console.error(
-      "POST /api/translation/chapters/:chapterId/pass - Error:",
-      error.message,
-    );
     res.status(500).json({ error: error.message });
   }
 });
 
-router.get("/acts/:actId/prompt", async (req, res) => {
+/**
+ * POST /api/translation/polish/:scope/:id
+ * Run polish on Act or SubAct
+ */
+router.post("/polish/:scope/:id", async (req, res) => {
   try {
-    const actId = Number(req.params.actId);
-    const model = req.query.model;
-    const act = await Act.findByPk(actId);
-    
-    if (!act) return res.status(404).json({ error: "Act not found" });
+    const { scope, id } = req.params;
+    const { model, temperature } = req.body;
 
-    const { messages } = await prepareActTranslationContext(act, model);
+    if (!["act", "subact"].includes(scope)) {
+      return res.status(400).json({ error: "Invalid scope" });
+    }
+
+    const result = await polishService.runPolish(scope, id, {
+      model,
+      temperature,
+    });
 
     res.status(200).json({
       success: true,
-      data: {
-        messages,
-      },
+      data: result,
     });
   } catch (error) {
-    console.error("GET /api/translation/acts/:actId/prompt - Error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-router.get("/acts/:actId/stream", async (req, res) => {
+/**
+ * POST /api/translation/polish-batch/:scope/:id
+ * Generate multiple batched polish variations in one LLM call (efficient)
+ * Request body: { model?, temperature?, count? }
+ */
+router.post("/polish-batch/:scope/:id", async (req, res) => {
   try {
-    const actId = Number(req.params.actId);
-    const model = req.query.model;
-    const act = await Act.findByPk(actId);
-    
-    if (!act) return res.status(404).json({ error: "Act not found" });
+    const { scope, id } = req.params;
+    const { model, temperature, count = 3 } = req.body;
 
-    const { messages, resolvedModel } = await prepareActTranslationContext(act, model);
-
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    const llmRequest = {
-      model: resolvedModel,
-      messages,
-      temperature: 0.4,
-      max_tokens: 16384,
-      stream: true
-    };
-
-    const response = await axios.post(LM_STUDIO_CHAT_ENDPOINT, llmRequest, {
-      responseType: 'stream'
-    });
-
-    let fullText = "";
-    
-    response.data.on('data', chunk => {
-      const raw = chunk.toString();
-      const lines = raw.split('\n');
-      
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data: ')) continue;
-        
-        const dataStr = trimmed.slice(6);
-        if (dataStr === '[DONE]') break;
-        
-        try {
-          const data = JSON.parse(dataStr);
-          const content = data.choices[0]?.delta?.content || "";
-          if (content) {
-            fullText += content;
-            res.write(`data: ${JSON.stringify({ content })}\n\n`);
-          }
-        } catch (e) {
-          // Ignore parse errors for incomplete chunks
-        }
-      }
-    });
-
-    response.data.on('end', async () => {
-      try {
-        const profile = act.anatomyProfile || {};
-        act.anatomyProfile = { ...profile, finalTranslation: fullText };
-        act.status = "ready";
-        await act.save();
-        // await aggregateChapterFinalText(act.chapterId);
-      } catch (err) {
-        console.error("Failed to save streamed translation:", err);
-      }
-      res.write('data: [DONE]\n\n');
-      res.end();
-    });
-
-    response.data.on('error', (err) => {
-      console.error("Stream error:", err);
-      res.end();
-    });
-
-  } catch (error) {
-    console.error("Streaming route error:", error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
-    } else {
-      res.end();
+    if (!["act", "subact"].includes(scope)) {
+      return res.status(400).json({ error: "Invalid scope" });
     }
+
+    const polishRecords = await polishService.generateBatchedPolishes(
+      scope,
+      id,
+      {
+        model,
+        temperature,
+        count: Math.min(count, 5), // Cap at 5 variations max
+      },
+    );
+
+    res.status(201).json({
+      success: true,
+      count: polishRecords.length,
+      data: polishRecords,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
+/**
+ * POST /api/translation/acts/:actId/finalize
+ * Finalize an Act by concatenating best text
+ */
+router.post("/acts/:actId/finalize", async (req, res) => {
+  try {
+    const actId = req.params.actId;
+    const finalText = await polishService.finalizeAct(actId);
+
+    // We could save this to the Act or just return it
+    res.status(200).json({
+      success: true,
+      finalText,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/translation/subacts/:subActId/prompt
+ * Get the translation prompt for a SubAct (for debugging)
+ */
+router.get("/subacts/:subActId/prompt", async (req, res) => {
+  try {
+    const subActId = req.params.subActId;
+    const { model } = req.query;
+    const { messages } =
+      await translationService.prepareSubActTranslationContext(subActId, model);
+
+    res.status(200).json({
+      success: true,
+      data: { messages },
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * PATCH /api/translation/subacts/:subActId
+ * Manually update subact translation
+ */
+router.patch("/subacts/:subActId", async (req, res) => {
+  try {
+    const subActId = req.params.subActId;
+    const { translatedText } = req.body;
+
+    const subAct = await SubAct.findByPk(subActId);
+    if (!subAct) return res.status(404).json({ error: "SubAct not found" });
+
+    await subAct.update({ translatedText });
+
+    res.status(200).json({ success: true, data: subAct });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * PATCH /api/translation/acts/:actId
+ * Manually update act translation
+ */
 router.patch("/acts/:actId", async (req, res) => {
   try {
-    const actId = Number(req.params.actId);
-    if (!Number.isInteger(actId) || actId < 1) {
-      return res.status(400).json({ error: "Invalid actId" });
-    }
-
-    const { draftTranslation, translation, rawText } = req.body;
+    const actId = req.params.actId;
+    const { translatedText } = req.body;
 
     const act = await Act.findByPk(actId);
-    if (!act) {
-      return res.status(404).json({ error: `Act ${actId} not found` });
-    }
+    if (!act) return res.status(404).json({ error: "Act not found" });
 
-    if (rawText !== undefined) {
-      act.rawText = rawText;
-    }
-    const profile = act.anatomyProfile || {};
-    let saveProfile = false;
-    
-    if (draftTranslation !== undefined) {
-      profile.draftTranslation = draftTranslation;
-      saveProfile = true;
-      act.status = "processing";
-    }
-    if (translation !== undefined) {
-      profile.finalTranslation = translation;
-      profile.pass3Final = translation;
-      saveProfile = true;
-      act.status = "ready";
-    }
+    await act.update({ translatedText });
 
-    if (translation !== undefined) {
-      act.translatedText = translation;
-    }
-
-    if (saveProfile) {
-      act.anatomyProfile = profile;
-    }
-
-    act.lastRunAt = new Date();
-    await act.save();
-
-    // if (translation !== undefined) {
-    //   await aggregateChapterFinalText(act.chapterId);
-    // }
-
-    res.status(200).json({
-      success: true,
-      message: "Act updated",
-      data: act,
-    });
+    res.status(200).json({ success: true, data: act });
   } catch (error) {
-    console.error("PATCH /api/translation/acts/:actId - Error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-router.delete("/chapters/:chapterId/acts", async (req, res) => {
-  try {
-    const chapterId = Number(req.params.chapterId);
-
-    if (!Number.isInteger(chapterId) || chapterId < 1) {
-      return res.status(400).json({ error: "Invalid chapterId" });
-    }
-
-    const chapter = await Chapter.findByPk(chapterId);
-    if (!chapter) {
-      return res.status(404).json({ error: `Chapter ${chapterId} not found` });
-    }
-
-    const deleted = await Act.destroy({ where: { chapterId } });
-
-    // Reset chapter status
-    chapter.status = "pending";
-    chapter.finalText = null;
-    chapter.strategyProfile = null;
-    await chapter.save();
-
-    res.status(200).json({
-      success: true,
-      message: `Deleted ${deleted} act(s) for chapter ${chapterId}`,
-      deletedCount: deleted,
-    });
-  } catch (error) {
-    console.error(
-      "DELETE /api/translation/chapters/:chapterId/acts - Error:",
-      error.message,
-    );
-    res.status(500).json({ error: error.message });
-  }
-});
-
+/**
+ * POST /api/translation/chapters/:chapterId/export
+ * Export the whole chapter
+ */
 router.post("/chapters/:chapterId/export", async (req, res) => {
   try {
-    const chapterId = Number(req.params.chapterId);
-    if (!Number.isInteger(chapterId) || chapterId < 1) {
-      return res.status(400).json({ error: "Invalid chapterId" });
-    }
-
-    const chapter = await aggregateChapterFinalText(chapterId);
-    if (!chapter) {
-      return res.status(404).json({ error: "Chapter not found" });
-    }
-
-    res.status(200).json({
-      success: true,
-      message: "Chapter exported successfully",
-      data: chapter,
+    const chapterId = req.params.chapterId;
+    const acts = await Act.findAll({
+      where: { chapterId },
+      order: [["sequence", "ASC"]],
     });
+
+    let finalChapterText = "";
+    for (const act of acts) {
+      const actText = await polishService.finalizeAct(act.id);
+      finalChapterText += actText + "\n\n";
+    }
+
+    const chapter = await Chapter.findByPk(chapterId);
+    await chapter.update({
+      finalText: finalChapterText.trim(),
+      status: "complete",
+    });
+
+    res.status(200).json({ success: true, finalText: finalChapterText.trim() });
   } catch (error) {
-    console.error("POST /api/translation/chapters/:chapterId/export - Error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-router.delete("/chapters/:chapterId/export", async (req, res) => {
+/**
+ * DELETE /api/translation/chapters/:chapterId/acts
+ * Delete all acts for a chapter (for re-segmentation)
+ */
+router.delete("/chapters/:chapterId/acts", async (req, res) => {
   try {
-    const chapterId = Number(req.params.chapterId);
-    if (!Number.isInteger(chapterId) || chapterId < 1) {
-      return res.status(400).json({ error: "Invalid chapterId" });
+    const chapterId = req.params.chapterId;
+
+    const acts = await Act.findAll({ where: { chapterId } });
+    const actIds = acts.map((a) => a.id);
+
+    if (actIds.length === 0) {
+      return res.status(200).json({ success: true, deletedCount: 0 });
     }
 
-    const chapter = await Chapter.findByPk(chapterId);
-    if (!chapter) {
-      return res.status(404).json({ error: "Chapter not found" });
-    }
+    // Delete all related data
+    await SubAct.destroy({ where: { actId: actIds } });
+    await Analysis.destroy({ where: { actId: actIds } });
+    await Polish.destroy({ where: { actId: actIds } });
 
-    chapter.finalText = null;
-    await chapter.save();
+    // Delete term appearances for these acts
+    const termAppearanceCount = await TermAppearance.destroy({
+      where: { actId: actIds },
+    });
+
+    // Delete acts
+    const deletedCount = await Act.destroy({ where: { chapterId } });
 
     res.status(200).json({
       success: true,
-      message: "Chapter result deleted successfully",
-      data: chapter,
+      deletedCount,
+      message: `Deleted ${deletedCount} acts and ${termAppearanceCount} term appearances`,
     });
   } catch (error) {
-    console.error("DELETE /api/translation/chapters/:chapterId/export - Error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/translation/acts/:actId/prompt
+ * Get the translation prompt for an Act (wrapper that handles Acts with SubActs)
+ */
+router.get("/acts/:actId/prompt", async (req, res) => {
+  try {
+    const actId = req.params.actId;
+    const { model } = req.query;
+
+    const act = await Act.findByPk(actId, {
+      include: [
+        { model: SubAct, as: "SubActs" },
+        {
+          model: Chapter,
+          as: "Chapter",
+          include: [{ model: Series, as: "Series" }],
+        },
+        {
+          model: Analysis,
+          as: "Analysis",
+        },
+      ],
+    });
+
+    if (!act) return res.status(404).json({ error: "Act not found" });
+
+    console.log(
+      `[Prompt] Act ${act.id} loaded. Has Analysis: ${!!act.Analysis}, Has anatomyProfile: ${!!act.Analysis?.anatomyProfile}`,
+    );
+
+    // If Act has SubActs, get prompt for the first one (primary subact)
+    if (act.SubActs && act.SubActs.length > 0) {
+      const { messages } =
+        await translationService.prepareSubActTranslationContext(
+          act.SubActs[0].id,
+          model,
+        );
+
+      // Log glossary status for debugging
+      const { smartInjectionService } = require("../services");
+      const termsData = await smartInjectionService.loadGlossaryForSeries(
+        act.Chapter.Series.id,
+      );
+      console.log(
+        `[Prompt] Act ${act.id} glossary terms loaded: ${termsData.injected.length} terms`,
+      );
+
+      return res.status(200).json({
+        success: true,
+        data: { messages },
+      });
+    }
+
+    // Otherwise, build prompt for the Act itself with glossary and analysis injected
+    const series = act.Chapter.Series;
+    const { smartInjectionService } = require("../services");
+
+    // Build glossary from approved terms
+    const termsData = await smartInjectionService.loadGlossaryForSeries(
+      series.id,
+    );
+    const glossaryText = smartInjectionService.buildGlossaryPrompt(termsData);
+
+    // Build comprehensive analysis context (structure, emotions, pacing, idioms, etc.)
+    const analysisContext = smartInjectionService.buildAnalysisContext(act);
+
+    const messages = translationService.buildTranslationPrompt({
+      language: series.language,
+      rawActText: act.rawText,
+      glossaryText,
+      analysisContext,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: { messages },
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/translation/acts/:actId/stream
+ * Stream translation for an Act (translates its SubActs sequentially)
+ * Query params: model={modelId}&pass={3|4}
+ */
+router.post("/acts/:actId/stream", async (req, res) => {
+  try {
+    const actId = req.params.actId;
+    const { model, pass = "3" } = req.query;
+
+    const act = await Act.findByPk(actId, {
+      include: [{ model: SubAct, as: "SubActs" }],
+    });
+
+    if (!act) return res.status(404).json({ error: "Act not found" });
+
+    // Set up SSE headers
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+
+    const sendChunk = (content) => {
+      res.write(`data: ${JSON.stringify({ content })}\n\n`);
+    };
+
+    try {
+      // If Act has SubActs, translate them sequentially
+      if (act.SubActs && act.SubActs.length > 0) {
+        const sortedSubActs = act.SubActs.sort(
+          (a, b) => a.sequence - b.sequence,
+        );
+
+        for (const subAct of sortedSubActs) {
+          if (pass === "4") {
+            // Polish mode - use existing method
+            const polishRes = await polishService.runPolish(
+              "subact",
+              subAct.id,
+              { model },
+            );
+            sendChunk(polishRes?.polishedText || "");
+          } else {
+            // Translation mode (pass 3) - use streaming
+            const { messages, resolvedModel } =
+              await translationService.prepareSubActTranslationContext(
+                subAct.id,
+                model,
+              );
+
+            const payload = {
+              model: resolvedModel,
+              messages,
+              temperature: 0.3,
+              top_p: 0.95,
+              max_tokens: 8192,
+            };
+
+            try {
+              const stream = await llmClient.streamChatCompletion(payload);
+
+              // Stream tokens as they arrive
+              for await (const chunk of stream) {
+                const token = chunk.choices[0]?.delta?.content || "";
+                if (token) {
+                  sendChunk(token);
+                }
+              }
+
+              // Save the complete translation to DB
+              const fullTranslation = ""; // TODO: would need to accumulate above
+              // For now, call the non-streaming version to save
+              await translationService.runTranslationOnSubAct({
+                subActId: subAct.id,
+                model,
+              });
+            } catch (streamError) {
+              console.error(
+                `Stream error for SubAct ${subAct.id}:`,
+                streamError,
+              );
+              // Fall back to non-streaming
+              const translateRes =
+                await translationService.runTranslationOnSubAct({
+                  subActId: subAct.id,
+                  model,
+                });
+              sendChunk(translateRes?.translation || "");
+            }
+          }
+        }
+      } else {
+        // If no SubActs, translate the Act's rawText directly
+        if (pass === "4") {
+          sendChunk("Act polish not available without subacts");
+        } else {
+          sendChunk(act.rawText); // Placeholder - could implement direct translation
+        }
+      }
+
+      res.write("data: [DONE]\n\n");
+      res.end();
+    } catch (err) {
+      sendChunk(`ERROR: ${err.message}`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/translation/subacts/:subActId/stream
+ * Stream translation for a single SubAct
+ * Query params: model={modelId}&pass={3|4}
+ */
+router.post("/subacts/:subActId/stream", async (req, res) => {
+  try {
+    const subActId = req.params.subActId;
+    const { model, pass = "3" } = req.query;
+
+    const subAct = await SubAct.findByPk(subActId, {
+      include: [
+        {
+          model: Act,
+          as: "Act",
+          include: [
+            {
+              model: Chapter,
+              as: "Chapter",
+              include: [{ model: Series, as: "Series" }],
+            },
+            {
+              model: Analysis,
+              as: "Analysis",
+            },
+          ],
+        },
+      ],
+    });
+
+    if (!subAct) return res.status(404).json({ error: "SubAct not found" });
+
+    // Set up SSE headers
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+
+    const sendChunk = (content) => {
+      res.write(`data: ${JSON.stringify({ content })}\n\n`);
+    };
+
+    try {
+      if (pass === "4") {
+        // Polish mode
+        const polishRes = await polishService.runPolish("subact", subAct.id, {
+          model,
+        });
+        sendChunk(polishRes?.polishedText || "");
+      } else {
+        // Translation mode (pass 3) - use streaming
+        const { messages, resolvedModel } =
+          await translationService.prepareSubActTranslationContext(
+            subAct.id,
+            model,
+          );
+
+        const payload = {
+          model: resolvedModel,
+          messages,
+          temperature: 0.3,
+          top_p: 0.95,
+          max_tokens: 8192,
+        };
+
+        try {
+          const stream = await llmClient.streamChatCompletion(payload);
+
+          // Stream tokens as they arrive
+          for await (const chunk of stream) {
+            const token = chunk.choices[0]?.delta?.content || "";
+            if (token) {
+              sendChunk(token);
+            }
+          }
+
+          // Save the complete translation to DB
+          await translationService.runTranslationOnSubAct({
+            subActId: subAct.id,
+            model,
+          });
+        } catch (streamError) {
+          console.error(`Stream error for SubAct ${subAct.id}:`, streamError);
+          // Fall back to non-streaming
+          const translateRes = await translationService.runTranslationOnSubAct({
+            subActId: subAct.id,
+            model,
+          });
+          sendChunk(translateRes?.translation || "");
+        }
+      }
+
+      res.write("data: [DONE]\n\n");
+      res.end();
+    } catch (err) {
+      sendChunk(`ERROR: ${err.message}`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * PATCH /api/translation/polish/:polishId/select
+ * Mark a polish variation as selected
+ */
+router.patch("/polish/:polishId/select", async (req, res) => {
+  try {
+    const polishId = Number(req.params.polishId);
+
+    const polish = await Polish.findByPk(polishId);
+    if (!polish) return res.status(404).json({ error: "Polish not found" });
+
+    // Update this polish as selected
+    await polish.update({ isSelected: true });
+
+    // If there's a scope and ID, mark others as not selected
+    // (Only one polish should be selected per act/subact)
+    if (polish.actId) {
+      await Polish.update(
+        { isSelected: false },
+        { where: { actId: polish.actId, id: { [Op.ne]: polishId } } },
+      );
+    }
+    if (polish.subActId) {
+      await Polish.update(
+        { isSelected: false },
+        { where: { subActId: polish.subActId, id: { [Op.ne]: polishId } } },
+      );
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Polish selected",
+      data: polish,
+    });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
