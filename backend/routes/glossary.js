@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const { GlossaryTerm } = require("../models");
+const { clearCache } = require("../services/glossaryCache");
 
 /**
  * PUT /api/glossary-terms/:id
@@ -18,7 +19,9 @@ router.put("/:id", async (req, res) => {
 
     // If status is being set to 'rejected', delete the term
     if (status === "rejected") {
+      const seriesId = term.seriesId;
       await term.destroy();
+      clearCache(seriesId);
       return res.status(200).json({
         success: true,
         message: `Glossary term ${id} deleted`,
@@ -38,6 +41,7 @@ router.put("/:id", async (req, res) => {
     }
 
     await term.save();
+    clearCache(term.seriesId);
 
     res.status(200).json({
       success: true,

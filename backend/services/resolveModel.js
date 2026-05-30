@@ -1,7 +1,8 @@
 const axios = require('axios');
 const { AIModel } = require('../models');
+const { normalizeBaseUrl } = require('../utils/normalizeBaseUrl');
 
-const LM_STUDIO_URL = (process.env.OLLAMA_URL || process.env.LM_STUDIO_URL || 'http://localhost:8080').replace(/\/+$/, '');
+const LM_STUDIO_URL = normalizeBaseUrl(process.env.OLLAMA_URL || process.env.LM_STUDIO_URL).replace(/\/v1$/, '');
 
 /**
  * Resolve the model ID to use for LM Studio / Ollama requests.

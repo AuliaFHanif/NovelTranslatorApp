@@ -56,11 +56,15 @@ async function main() {
       {
         role: "system",
         content: `You are an expert Literary Editor. Your task is to perform "Scene Slicing" on a story.
-Analyze the provided paragraph transition hooks and partition them into logical, individual scenes. A scene change occurs when there is a significant shift in time, setting, characters, or narrative focus.
+Analyze the provided paragraph transition hooks and partition them into logical, individual scenes.
 
 You must return a valid JSON object containing an array of the starting paragraph indices (0-indexed) for each scene.
 Example Output:
-{"scene_starts": [0, 2, 5]}`
+{"scene_starts": [0, 5, 8]}
+
+CRITICAL RULES FOR REASONING AND OUTPUT:
+1. Keep your internal thinking/reasoning process extremely brief (under 2 sentences total). Do NOT perform a detailed step-by-step or paragraph-by-paragraph analysis in your thoughts.
+2. Do NOT write any explanations, introductory text, or summaries in the final response. The final response must consist ONLY of the valid JSON object itself, with absolutely no other text.`
       },
       {
         role: "user",
@@ -76,7 +80,7 @@ ${paragraphs.map((p, i) => `[Paragraph ${i}]\n${compressParagraph(p.text, 300)}`
       model,
       messages,
       temperature: 0.2,
-      max_tokens: 1000,
+      max_tokens: 3000,
       response_format: { type: "json_object" }
     });
 
@@ -90,7 +94,7 @@ ${paragraphs.map((p, i) => `[Paragraph ${i}]\n${compressParagraph(p.text, 300)}`
       const parsed = JSON.parse(response.choices[0].message.content);
       console.log("Parsed scene starts:", parsed.scene_starts);
     } else {
-      console.log("No content was returned. Model was likely cut off during reasoning.");
+      console.log("No content was returned.");
     }
   } catch (err) {
     console.error("Compressed 300 segment test failed:", err);

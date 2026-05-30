@@ -96,41 +96,43 @@ class SceneCreationService {
     const paragraphs = this.normalizeParagraphs(text);
     const scenes = await detectScenes(paragraphs, options);
     
-    // Delete original
-    await originalScene.destroy();
-    
-    // Create new scenes with same chapterId, renumbered
     const chapterId = originalScene.chapterId;
     const originalSequence = originalScene.sequence;
-    
-    // Shift existing scenes down
-    await Scene.update(
-      { sequence: sequelize.literal('sequence + ' + (scenes.length - 1)) },
-      { 
-        where: { 
-          chapterId, 
-          sequence: { [Op.gt]: originalSequence } 
-        } 
+
+    return await sequelize.transaction(async (t) => {
+      // Delete original
+      await originalScene.destroy({ transaction: t });
+      
+      // Shift existing scenes down
+      await Scene.update(
+        { sequence: sequelize.literal('sequence + ' + (scenes.length - 1)) },
+        { 
+          where: { 
+            chapterId, 
+            sequence: { [Op.gt]: originalSequence } 
+          },
+          transaction: t,
+        }
+      );
+      
+      // Create replacement scenes
+      const created = [];
+      for (let i = 0; i < scenes.length; i++) {
+        const scene = await Scene.create({
+          chapterId,
+          sequence: originalSequence + i,
+          sceneType: scenes[i].sceneType,
+          rawText: scenes[i].rawText,
+          tokenCount: scenes[i].estimatedTokens,
+          charCount: scenes[i].charCount,
+          wordCount: scenes[i].wordCount,
+          status: 'segmented'
+        }, { transaction: t });
+        created.push(scene);
       }
-    );
-    
-    // Create replacement scenes
-    const created = [];
-    for (let i = 0; i < scenes.length; i++) {
-      const scene = await Scene.create({
-        chapterId,
-        sequence: originalSequence + i,
-        sceneType: scenes[i].sceneType,
-        rawText: scenes[i].rawText,
-        tokenCount: scenes[i].estimatedTokens,
-        charCount: scenes[i].charCount,
-        wordCount: scenes[i].wordCount,
-        status: 'segmented'
-      });
-      created.push(scene);
-    }
-    
-    return { scenes: created, split: true, count: scenes.length };
+      
+      return { scenes: created, split: true, count: scenes.length };
+    });
   }
 
   /**

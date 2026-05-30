@@ -31,6 +31,9 @@ import {
   deleteAllScenes,
   extractSceneTerms,
   analyzeScene,
+  bulkApproveTermsToScene,
+  // Real-time translation stream helper
+  streamSceneTranslation,
   type AIModel,
   type GlossaryCandidate,
 } from "../lib/api";
@@ -44,6 +47,8 @@ import {
 import { Badge } from "../components/ui/badge";
 import { GlossaryApprovalDialog } from "../components/GlossaryApprovalDialog";
 import { PolishSelectionPanel } from "../components/PolishSelectionPanel";
+import { Document, Packer, Paragraph, TextRun, HeadingLevel } from "docx";
+import { saveAs } from "file-saver";
 
 export function Translation() {
   const [searchParams] = useSearchParams();
@@ -76,6 +81,11 @@ export function Translation() {
     new Set(),
   );
   const [polishPanelVisible, setPolishPanelVisible] = useState(true);
+
+  // Simulation states
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [simStep, setSimStep] = useState(0);
+  const [simLogs, setSimLogs] = useState<string[]>([]);
 
   const seriesId = Number(searchParams.get("seriesId") || "0");
   const chapterId = Number(searchParams.get("chapterId") || "0");
@@ -192,7 +202,7 @@ export function Translation() {
       let computedText = selectedScene.translatedText || "";
       for (const edit of appliedEdits) {
         if (edit.applied) {
-          computedText = computedText.replace(edit.original, edit.replacement);
+          computedText = computedText.replaceAll(edit.original, edit.replacement);
         }
       }
 
@@ -203,8 +213,10 @@ export function Translation() {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              translatedText: computedText,
+              translatedText: selectedScene.translatedText,
+              finalText: computedText,
               polishEdits: appliedEdits,
+              status: "complete",
             }),
           },
         );
@@ -215,7 +227,7 @@ export function Translation() {
         }
 
         await loadTranslationChapter();
-        await showSuccess("Polish Applied", `Applied ${appliedEdits.filter((e) => e.applied).length} edits successfully.`);
+        await showSuccess("Polish Applied", `Applied ${appliedEdits.filter((e) => e.applied).length} edits successfully. Scene marked complete.`);
       } catch (error) {
         await showError(
           "Apply Failed",
@@ -243,7 +255,20 @@ export function Translation() {
 
     try {
       setIsRunningPass(true);
-      await translateScene(selectedScene.id, { model: modelName });
+      setEditableTranslation(""); // Clear and lock editor for streaming
+
+      let streamedText = "";
+      await streamSceneTranslation(selectedScene.id, modelName, (chunk) => {
+        streamedText += chunk;
+        // Perform clean, inline stripping of thinking and analysis blocks on the fly
+        const cleanText = streamedText
+          .replace(/<think>[\s\S]*?<\/think>/g, "")
+          .replace(/<think>[\s\S]*/g, "")
+          .replace(/<analysis>[\s\S]*?<\/analysis>/g, "")
+          .replace(/<analysis>[\s\S]*/g, "");
+        setEditableTranslation(cleanText);
+      });
+
       await loadTranslationChapter();
       await showSuccess(
         "Translation Completed",
@@ -490,30 +515,45 @@ export function Translation() {
         setFailedExtractionScenes(failedIds);
         await loadTranslationChapter();
 
-        if (allTerms.length > 0) {
-          setExtractedTerms(allTerms);
+        // Filter out terms already in database and deduplicate terms picked up in this pass
+        const seenTerms = new Set<string>();
+        const filteredTerms: GlossaryCandidate[] = [];
+        for (const t of allTerms) {
+          if (t.existingId !== null || (t as any).matchType !== "new") {
+            continue;
+          }
+          const norm = t.term.trim().toLowerCase().normalize("NFKC");
+          if (seenTerms.has(norm)) {
+            continue;
+          }
+          seenTerms.add(norm);
+          filteredTerms.push(t);
+        }
+
+        if (filteredTerms.length > 0) {
+          setExtractedTerms(filteredTerms);
           setIsGlossaryDialogOpen(true);
           if (failed > 0) {
             await showInfo(
               "Extraction Complete (with Errors)",
-              `Extracted ${allTerms.length} terms from ${completed} scenes. ${failed} scene(s) failed - marked with ⚠️ in the scenes list.`,
+              `Extracted ${filteredTerms.length} new terms from ${completed} scenes. ${failed} scene(s) failed - marked with ⚠️ in the scenes list.`,
             );
           } else {
             await showSuccess(
               "Extraction Complete",
-              `Extracted ${allTerms.length} terms from all ${completed} scenes.`,
+              `Extracted ${filteredTerms.length} new terms from all ${completed} scenes.`,
             );
           }
         } else {
           if (failed > 0) {
             await showError(
               "Extraction Failed",
-              `Could not extract terms from any scenes. ${failed} scene(s) failed.`,
+              `Could not extract any new terms from scenes. ${failed} scene(s) failed.`,
             );
           } else {
             await showInfo(
-              "No Terms Found",
-              "AI did not identify new terminology in any scenes.",
+              "No New Terms Found",
+              "AI did not identify any new terminology that is not already in your library.",
             );
           }
         }
@@ -697,8 +737,30 @@ export function Translation() {
       });
 
       if (result.terms && result.terms.length > 0) {
-        setExtractedTerms(result.terms as unknown as GlossaryCandidate[]);
-        setIsGlossaryDialogOpen(true);
+        // Filter out terms already in database and deduplicate
+        const seenTerms = new Set<string>();
+        const filteredTerms: GlossaryCandidate[] = [];
+        for (const t of result.terms) {
+          if (t.existingId !== null || t.matchType !== "new") {
+            continue;
+          }
+          const norm = t.term.trim().toLowerCase().normalize("NFKC");
+          if (seenTerms.has(norm)) {
+            continue;
+          }
+          seenTerms.add(norm);
+          filteredTerms.push(t);
+        }
+
+        if (filteredTerms.length > 0) {
+          setExtractedTerms(filteredTerms);
+          setIsGlossaryDialogOpen(true);
+        } else {
+          await showInfo(
+            "No New Terms",
+            "All identified terms already exist in the library.",
+          );
+        }
       } else {
         await showInfo(
           "No Terms Found",
@@ -736,6 +798,207 @@ export function Translation() {
     }
   }
 
+  const runE2ESimulation = async () => {
+    if (!chapter) return;
+    setIsSimulating(true);
+    setSimStep(1);
+    setSimLogs([
+      "[Simulation] Initializing E2E Autoplay...",
+      "[Simulation] Bootstrapping workspace and establishing connections...",
+      `[Simulation] Model target: ${modelName}`
+    ]);
+    
+    try {
+      // Step 1: Segmentation
+      setSimLogs(prev => [...prev, "[Pass 1] Starting Scene Segmentation...", "[Pass 1] Invoking Ollama with chapter paragraphs..."]);
+      const segResult = await runSceneSegmentation(chapter.id, { model: modelName });
+      await loadTranslationChapter();
+      setSimLogs(prev => [
+        ...prev,
+        `[Pass 1] Success! Story divided into ${segResult.scenesCreated} logical scenes.`,
+        "[Pass 1] Scene boundaries successfully persisted in PostgreSQL."
+      ]);
+      setSimStep(2);
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Step 2: Tone Analysis
+      setSimLogs(prev => [...prev, "[Pass 2] Starting Narrative & Tone Analysis...", "[Pass 2] Extracting mood, emotional weight, and pacing profiles..."]);
+      const scenesData = await getScenes(chapterId);
+      for (const scene of scenesData) {
+        setSimLogs(prev => [...prev, `[Pass 2] Analyzing Scene ${scene.sequence}...`]);
+        await analyzeScene(scene.id, { model: modelName });
+      }
+      await loadTranslationChapter();
+      setSimLogs(prev => [...prev, "[Pass 2] Success! All scenes analyzed. Tone metadata persisted in database."]);
+      setSimStep(3);
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Step 3: Term Extraction
+      setSimLogs(prev => [...prev, "[Pass 3] Starting Term & Name Extraction...", "[Pass 3] Identifying key characters, locations, items, and concepts..."]);
+      const allTerms: GlossaryCandidate[] = [];
+      for (const scene of scenesData) {
+        setSimLogs(prev => [...prev, `[Pass 3] Extracting terms from Scene ${scene.sequence}...`]);
+        const result = await extractSceneTerms(scene.id, { model: modelName });
+        if (result.terms) {
+          allTerms.push(...result.terms);
+        }
+      }
+      
+      // Filter & Deduplicate
+      const seenTerms = new Set<string>();
+      const filteredTerms: GlossaryCandidate[] = [];
+      for (const t of allTerms) {
+        if (t.existingId !== null || (t as any).matchType !== "new") continue;
+        const norm = t.term.trim().toLowerCase().normalize("NFKC");
+        if (seenTerms.has(norm)) continue;
+        seenTerms.add(norm);
+        filteredTerms.push(t);
+      }
+
+      setSimLogs(prev => [
+        ...prev,
+        `[Pass 3] Extracted ${allTerms.length} raw candidates.`,
+        `[Pass 3] Filtered down to ${filteredTerms.length} unique NEW terms (excluding existing terms).`,
+        `[Pass 3] Simulating Glossary Candidate Checklist Dialog...`
+      ]);
+
+      if (filteredTerms.length > 0) {
+        setExtractedTerms(filteredTerms);
+        setIsGlossaryDialogOpen(true);
+        setSimLogs(prev => [...prev, "[Pass 3] Demo: Autocomplete user checklist. Approving candidates to Series Glossary..."]);
+        await new Promise(r => setTimeout(r, 3000));
+        
+        // Auto-approve terms
+        const selectedTerms = filteredTerms.map((t) => ({
+          term: t.term,
+          type: t.type,
+          proposedTranslation: t.proposedTranslation || t.term,
+          definition: (t as any).definition || t.term,
+          confidence: t.confidence,
+        }));
+        await bulkApproveTermsToScene(seriesId, chapter?.Series?.language || "zh", selectedTerms);
+        setIsGlossaryDialogOpen(false);
+        setSimLogs(prev => [...prev, `[Pass 3] Success! Approved ${selectedTerms.length} terms saved in the library database.`]);
+      } else {
+        setSimLogs(prev => [...prev, "[Pass 3] No new terms found. Continuing..."]);
+      }
+      setSimStep(4);
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Step 4: Smart Glossary Injection & Translation
+      setSimLogs(prev => [
+        ...prev,
+        "[Pass 4] Starting Context-Aware Translation...",
+        "[Pass 4] Activating Smart Glossary Injection system...",
+        "[Pass 4] Injecting scene-specific names/places in prompt context..."
+      ]);
+      const updatedScenes = await getScenes(chapterId);
+      for (const scene of updatedScenes) {
+        setSimLogs(prev => [...prev, `[Pass 4] Translating Scene ${scene.sequence} with Smart Injection...`]);
+        await translateScene(scene.id, { model: modelName });
+      }
+      await loadTranslationChapter();
+      setSimLogs(prev => [...prev, "[Pass 4] Success! All scenes translated with smart vocabulary injections."]);
+      setSimStep(5);
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Step 5: Constrained Polishing Side-by-Side Review
+      setSimLogs(prev => [
+        ...prev,
+        "[Pass 5] Starting Constrained Phrasing Polishing...",
+        "[Pass 5] Generating style, clarity, and grammatical alternative edits..."
+      ]);
+      const translatedScenes = await getScenes(chapterId);
+      for (const scene of translatedScenes) {
+        setSimLogs(prev => [...prev, `[Pass 5] Polishing Scene ${scene.sequence}...`]);
+        await polishScene(scene.id, { model: modelName });
+      }
+      await loadTranslationChapter();
+      setSimLogs(prev => [
+        ...prev,
+        "[Pass 5] Polish pass complete. Simulating Side-by-Side Polish Review panel...",
+        "[Pass 5] Auto-selecting edits and committing approvals..."
+      ]);
+      
+      const polishedScenes = await getScenes(chapterId);
+      if (polishedScenes.length > 0) {
+        setSelectedSceneId(polishedScenes[0].id);
+        setPolishPanelVisible(true);
+        await new Promise(r => setTimeout(r, 3000));
+
+        // Apply edits for all scenes
+        for (const scene of polishedScenes) {
+          const edits = scene.polishEdits || [];
+          let computedText = scene.translatedText || "";
+          for (const edit of edits) {
+            computedText = computedText.replace(edit.original, edit.replacement);
+          }
+          await fetch(`${API_BASE_URL}/scenes/${scene.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              translatedText: scene.translatedText,
+              finalText: computedText,
+              polishEdits: edits.map(e => ({ ...e, applied: true })),
+              status: "complete",
+            }),
+          });
+        }
+        await loadTranslationChapter();
+        setSimLogs(prev => [...prev, "[Pass 5] Success! All polish edits approved and committed. Scenes marked complete (emerald dot status)."]);
+      }
+      setSimStep(6);
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Step 6: DOCX Export
+      setSimLogs(prev => [...prev, "[Export] Compiling all approved scene translations into formatted Microsoft Word document...", "[Export] Compiling paragraph runs and generating download blob..."]);
+      await handleExportDocx();
+      setSimLogs(prev => [...prev, "[Export] Success! Formatted DOCX file downloaded to system. E2E pipeline completed successfully! 🎉"]);
+      setSimStep(7);
+    } catch (err) {
+      console.error(err);
+      setSimLogs(prev => [...prev, `[Error] Simulation failed: ${err instanceof Error ? err.message : String(err)}`]);
+    }
+  };
+
+  async function handleExportDocx() {
+    if (!chapter) return;
+    if (scenes.length === 0) {
+      await showInfo("No content", "There are no scenes to export.");
+      return;
+    }
+    
+    try {
+      const doc = new Document({
+        sections: [
+          {
+            properties: {},
+            children: [
+              new Paragraph({
+                text: chapter.title || `Chapter ${chapter.number}`,
+                heading: HeadingLevel.HEADING_1,
+              }),
+              ...scenes.flatMap((s) => {
+                const text = s.finalText || s.translatedText || "";
+                return text.split('\n').filter(p => p.trim()).map(p => 
+                  new Paragraph({
+                    children: [new TextRun(p)],
+                    spacing: { after: 200 }
+                  })
+                );
+              }),
+            ],
+          },
+        ],
+      });
+
+      const blob = await Packer.toBlob(doc);
+      saveAs(blob, `Chapter_${chapter.number}_Translation.docx`);
+      await showSuccess("Export Successful", "DOCX file has been saved.");
+    } catch (error) {
+      await showError("Export Failed", error instanceof Error ? error.message : "Unable to export DOCX");
+    }
+  }
 
 
   if (isLoadingChapter) {
@@ -857,11 +1120,25 @@ export function Translation() {
             <div className="w-[1px] h-8 bg-[#d8cdbd] mx-1" />
 
             <Button
+              onClick={() => void runE2ESimulation()}
+              disabled={isSimulating || !isLmStudioOnline}
+              className="bg-[#8b2626] hover:bg-[#701c1c] text-white h-8 text-[9px] tracking-widest rounded-sm px-4 font-sans uppercase shadow-sm border-none mr-2 cursor-pointer transition-all"
+            >
+              {isSimulating ? "SIMULATION RUNNING" : "AUTOPLAY E2E SIMULATION"}
+            </Button>
+            <Button
               variant="outline"
               onClick={() => void loadTranslationChapter()}
               className="border-[#d8cdbd] text-[#807068] h-8 text-[9px] tracking-widest rounded-sm px-4 hover:bg-[#f2eadc] bg-transparent font-sans uppercase"
             >
               REFRESH
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void handleExportDocx()}
+              className="flex items-center justify-center border border-[#d8cdbd] text-[#a0908b] h-8 text-[9px] tracking-widest rounded-sm px-4 hover:bg-[#f2eadc] hover:text-[#4A3D39] bg-transparent font-sans uppercase transition-colors"
+            >
+              EXPORT DOCX
             </Button>
             <Link
               to={`/contextLibrary?seriesId=${seriesId}`}
@@ -877,9 +1154,9 @@ export function Translation() {
         {/* MAIN WORKSPACE */}
         <div className="flex-1 flex gap-4 min-h-0 overflow-hidden">
           {/* Column 1: Source & Analysis */}
-          <div className="flex-[0.4] flex flex-col gap-4 min-h-0">
+          <div className="flex-[0.4] flex flex-col gap-4 min-h-0 h-full">
             {/* Source Card */}
-            <div className="flex-[0.6] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0">
+            <div className="flex-1 basis-0 flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0">
               <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
                 <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
                   Scene Source
@@ -912,7 +1189,7 @@ export function Translation() {
             </div>
 
             {/* Analysis Card */}
-            <div className="flex-[0.4] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0 relative">
+            <div className="flex-1 basis-0 flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0 relative">
               <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30">
                 <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
                   Scene Context
@@ -1156,42 +1433,6 @@ export function Translation() {
                       </div>
                     )}
 
-                    <div className="pt-4 border-t border-[#d8cdbd]/30 mt-4 flex flex-col gap-2">
-                      <div className="flex gap-2">
-                        <Button
-                          variant="outline"
-                          onClick={() => void handleExtractTerms()}
-                          disabled={
-                            isExtractingTerms ||
-                            isAnalyzingScene ||
-                            !selectedScene ||
-                            !isLmStudioOnline
-                          }
-                          className="flex-1 h-8 text-[9px] tracking-widest border-[#d8cdbd] text-[#807068] hover:bg-[#f2eadc] font-sans uppercase rounded-sm"
-                        >
-                          {isExtractingTerms
-                            ? "EXTRACTING..."
-                            : "EXTRACT TERMS"}
-                        </Button>
-                        <Button
-                          variant="outline"
-                          onClick={() => void handleAnalyzeScene()}
-                          disabled={
-                            isExtractingTerms ||
-                            isAnalyzingScene ||
-                            !selectedScene ||
-                            !isLmStudioOnline
-                          }
-                          className="flex-1 h-8 text-[9px] tracking-widest border-[#d8cdbd] text-[#807068] hover:bg-[#f2eadc] font-sans uppercase rounded-sm"
-                        >
-                          {isAnalyzingScene ? "ANALYZING..." : "ANALYZE TONE"}
-                        </Button>
-                      </div>
-                      <p className="text-[8px] text-[#a0908b] mt-1 italic text-center px-1 leading-relaxed">
-                        Refine the scene's emotional context and identify key
-                        terminology to guide the AI translator.
-                      </p>
-                    </div>
                   </div>
                 ) : (
                   <div className="h-full flex items-center justify-center text-[#a0908b] italic text-[11px]">
@@ -1199,6 +1440,46 @@ export function Translation() {
                   </div>
                 )}
               </div>
+
+              {/* Fixed / Anchored Action Buttons Footer */}
+              {selectedScene && (
+                <div className="shrink-0 p-4 border-t border-[#d8cdbd]/50 bg-[#f2eadc]/10 flex flex-col gap-2">
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => void handleExtractTerms()}
+                      disabled={
+                        isExtractingTerms ||
+                        isAnalyzingScene ||
+                        !selectedScene ||
+                        !isLmStudioOnline
+                      }
+                      className="flex-1 h-8 text-[9px] tracking-widest border-[#d8cdbd] text-[#807068] hover:bg-[#f2eadc] font-sans uppercase rounded-sm cursor-pointer"
+                    >
+                      {isExtractingTerms
+                        ? "EXTRACTING..."
+                        : "EXTRACT TERMS"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => void handleAnalyzeScene()}
+                      disabled={
+                        isExtractingTerms ||
+                        isAnalyzingScene ||
+                        !selectedScene ||
+                        !isLmStudioOnline
+                      }
+                      className="flex-1 h-8 text-[9px] tracking-widest border-[#d8cdbd] text-[#807068] hover:bg-[#f2eadc] font-sans uppercase rounded-sm cursor-pointer"
+                    >
+                      {isAnalyzingScene ? "ANALYZING..." : "ANALYZE TONE"}
+                    </Button>
+                  </div>
+                  <p className="text-[8px] text-[#a0908b] italic text-center px-1 leading-relaxed">
+                    Refine the scene's emotional context and identify key
+                    terminology to guide the AI translator.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1256,19 +1537,31 @@ export function Translation() {
             <textarea
               value={editableTranslation}
               onChange={(e) => setEditableTranslation(e.target.value)}
-              className="flex-1 p-6 resize-none outline-none bg-white font-serif text-[#4A3D39] text-base leading-relaxed selection:bg-rose-100 placeholder:italic placeholder:text-[#A0908B]/50"
+              disabled={isRunningPass}
+              className={`flex-1 p-6 resize-none outline-none font-serif text-base leading-relaxed selection:bg-rose-100 placeholder:italic placeholder:text-[#A0908B]/50 transition-all duration-300 ${isRunningPass ? 'bg-[#FAF6F3] text-[#A0908B] cursor-not-allowed shadow-inner' : 'bg-white text-[#4A3D39]'}`}
               placeholder="Translation output..."
             />
 
-            <div className="flex justify-between items-center p-3 border-t border-[#d8cdbd]/50 bg-white/50 shrink-0 px-6">
+             <div className="flex justify-between items-center p-3 border-t border-[#d8cdbd]/50 bg-white/50 shrink-0 px-6">
               <div className="text-[9px] font-sans text-[#a0908b] tracking-widest uppercase">
                 Scene {selectedScene?.sequence || "-"} &bull; Status:{" "}
                 {selectedScene?.status || "Pending"}
               </div>
               <div className="flex gap-2">
+                {(selectedScene?.status === "polished" || selectedScene?.status === "complete") && !polishPanelVisible && (
+                  <Button
+                    variant="ghost"
+                    onClick={() => setPolishPanelVisible(true)}
+                    disabled={isRunningPass}
+                    className="h-7 text-[9px] tracking-[0.1em] text-amber-600 hover:text-amber-800 font-sans uppercase px-3"
+                  >
+                    Review Polish
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
                   onClick={() => void handleCopyTranslation()}
+                  disabled={isRunningPass}
                   className="h-7 text-[9px] tracking-[0.1em] text-[#a0908b] hover:text-[#4A3D39] font-sans uppercase"
                 >
                   Copy
@@ -1276,7 +1569,7 @@ export function Translation() {
                 <Button
                   variant="outline"
                   onClick={() => void handleSaveTranslation()}
-                  disabled={isSaving || !selectedScene}
+                  disabled={isSaving || !selectedScene || isRunningPass}
                   className="h-7 text-[9px] tracking-[0.1em] border-[#d8cdbd] text-[#807068] hover:bg-[#f2eadc] font-sans uppercase px-6"
                 >
                   {isSaving ? "Saving..." : "Save Edit"}
@@ -1284,7 +1577,7 @@ export function Translation() {
               </div>
             </div>
 
-            {selectedScene?.status === "polished" &&
+            {(selectedScene?.status === "polished" || selectedScene?.status === "complete") &&
               selectedScene.finalText &&
               polishPanelVisible && (
                 <PolishSelectionPanel
@@ -1351,10 +1644,14 @@ export function Translation() {
                           ⚠️
                         </div>
                       )}
-                      {s.status === "polished" ? (
-                        <div className="w-1.5 h-1.5 bg-[#2f7a46] rounded-full" />
+                      {s.status === "complete" ? (
+                        <div className="w-1.5 h-1.5 bg-[#2f7a46] rounded-full" title="Approved & Completed" />
+                      ) : s.status === "polished" ? (
+                        <div className="w-1.5 h-1.5 bg-[#d8c080] rounded-full" title="Polished, Pending Review" />
                       ) : s.status === "translated" ? (
-                        <div className="w-1.5 h-1.5 bg-[#8B2626] rounded-full" />
+                        <div className="w-1.5 h-1.5 bg-[#8B2626] rounded-full" title="Translated" />
+                      ) : s.status === "analyzed" ? (
+                        <div className="w-1.5 h-1.5 bg-[#3b82f6] rounded-full" title="Analyzed" />
                       ) : null}
                     </div>
                   </div>
@@ -1483,6 +1780,101 @@ export function Translation() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {isSimulating && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="w-full max-w-2xl bg-[#FBF9F6] border border-[#d8cdbd] rounded-sm p-6 shadow-2xl flex flex-col gap-6 max-h-[85vh]">
+            <div className="flex justify-between items-start border-b border-[#d8cdbd]/60 pb-3">
+              <div>
+                <h3 className="text-[14px] font-bold font-sans uppercase tracking-[0.2em] text-[#8B2626]">
+                  E2E PIPELINE SIMULATION ACTIVE
+                </h3>
+                <p className="text-[10px] text-[#a0908b] font-sans uppercase mt-0.5 tracking-wider font-bold">
+                  Autoplayer: Simulating 5-Pass Pipeline & Smart Glossary Injection
+                </p>
+              </div>
+              {simStep === 7 && (
+                <Button
+                  onClick={() => setIsSimulating(false)}
+                  className="h-7 text-[9px] tracking-widest bg-[#2f7a46] hover:bg-[#1a4d2e] text-white px-4 font-sans uppercase rounded-sm border-none shadow-sm cursor-pointer"
+                >
+                  CLOSE
+                </Button>
+              )}
+            </div>
+
+            {/* Stepper progress */}
+            <div className="grid grid-cols-6 gap-2 shrink-0">
+              {[
+                { name: "SEGMENT", step: 1 },
+                { name: "ANALYZE", step: 2 },
+                { name: "TERMS", step: 3 },
+                { name: "TRANSLATE", step: 4 },
+                { name: "POLISH", step: 5 },
+                { name: "EXPORT", step: 6 },
+              ].map((s) => {
+                const isActive = simStep === s.step;
+                const isCompleted = simStep > s.step;
+                return (
+                  <div key={s.name} className="flex flex-col gap-1.5 items-center">
+                    <div
+                      className={`w-full h-1 rounded-full transition-all duration-500 ${
+                        isActive
+                          ? "bg-[#8B2626] shadow-[0_0_8px_rgba(139,38,38,0.4)] animate-pulse"
+                          : isCompleted
+                            ? "bg-[#2f7a46]"
+                            : "bg-[#d8cdbd]/40"
+                      }`}
+                    />
+                    <span
+                      className={`text-[8px] font-bold font-sans tracking-wider uppercase text-center ${
+                        isActive
+                          ? "text-[#8B2626]"
+                          : isCompleted
+                            ? "text-[#2f7a46]"
+                            : "text-[#a0908b]"
+                      }`}
+                    >
+                      {s.name}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Terminal logger */}
+            <div className="flex-1 min-h-0 flex flex-col gap-2">
+              <span className="text-[9px] font-bold font-sans uppercase tracking-widest text-[#807068]">
+                Console Logs
+              </span>
+              <div
+                id="sim-terminal"
+                className="flex-1 bg-[#251e1b] text-[#f2eadc] font-mono p-4 rounded-sm border border-[#1e1917] overflow-y-auto text-[11px] leading-relaxed shadow-inner h-60 custom-scrollbar"
+              >
+                {simLogs.map((log, i) => (
+                  <div key={i} className={log.startsWith("[Error") ? "text-red-400 font-bold" : log.startsWith("[Success") || log.startsWith("[Pass") && log.includes("Success") || log.includes("🎉") ? "text-emerald-400 font-bold" : log.startsWith("[Pass") ? "text-amber-300 font-bold" : ""}>
+                    {log}
+                  </div>
+                ))}
+                <div className="animate-pulse inline-block w-1.5 h-3 bg-[#f2eadc] ml-1" />
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center text-[9px] font-sans text-[#a0908b] tracking-wider uppercase border-t border-[#d8cdbd]/40 pt-3 shrink-0 font-bold">
+              <span>Step {Math.min(simStep, 6)} of 6</span>
+              {simStep < 7 ? (
+                <span className="animate-pulse text-[#8B2626] font-bold">
+                  AI SIMULATION RUNNING...
+                </span>
+              ) : (
+                <span className="text-[#2f7a46] font-bold">
+                  SIMULATION COMPLETE 🎉
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,12 +1,5 @@
 const OpenAI = require("openai");
-
-/**
- * Normalizes LM Studio base URL to ensure it ends with /v1
- */
-function normalizeBaseUrl(url) {
-  const base = (url || process.env.OLLAMA_URL || process.env.LM_STUDIO_URL || "http://localhost:8080").replace(/\/+$/, "");
-  return base.endsWith("/v1") ? base : `${base}/v1`;
-}
+const { normalizeBaseUrl } = require("../utils/normalizeBaseUrl");
 
 class LLMClient {
   constructor() {

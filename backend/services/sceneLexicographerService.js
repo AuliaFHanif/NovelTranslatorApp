@@ -243,6 +243,7 @@ For each term, provide:
       const enrichedTerm = {
         term: aiTerm.term,
         type: aiTerm.type,
+        context: aiTerm.context || aiTerm.snippet || "",
         definition: aiTerm.definition,
         proposedTranslation: aiTerm.proposedTranslation,
         confidence: aiTerm.confidence,
@@ -376,6 +377,7 @@ For each term, provide:
     return {
       term: cleanedTerm,
       type: (term.type || "concept").trim().toLowerCase(),
+      context: (term.context || "").trim(),
       definition: (term.definition || "").trim(),
       proposedTranslation: (term.proposedTranslation || "").trim(),
       confidence: Number(term.confidence),
@@ -499,25 +501,27 @@ For each term, provide:
   _levenshteinDistance(str1, str2) {
     const len1 = str1.length;
     const len2 = str2.length;
-    const matrix = Array(len2 + 1)
-      .fill(null)
-      .map(() => Array(len1 + 1).fill(0));
 
-    for (let i = 0; i <= len1; i++) matrix[0][i] = i;
-    for (let j = 0; j <= len2; j++) matrix[j][0] = j;
+    // Two-row space optimization: O(min(n,m)) memory instead of O(n*m)
+    let prev = Array(len2 + 1);
+    let curr = Array(len2 + 1);
 
-    for (let j = 1; j <= len2; j++) {
-      for (let i = 1; i <= len1; i++) {
-        const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
-        matrix[j][i] = Math.min(
-          matrix[j][i - 1] + 1, // deletion
-          matrix[j - 1][i] + 1, // insertion
-          matrix[j - 1][i - 1] + indicator, // substitution
+    for (let j = 0; j <= len2; j++) prev[j] = j;
+
+    for (let i = 1; i <= len1; i++) {
+      curr[0] = i;
+      for (let j = 1; j <= len2; j++) {
+        const cost = str1[i - 1] === str2[j - 1] ? 0 : 1;
+        curr[j] = Math.min(
+          curr[j - 1] + 1,
+          prev[j] + 1,
+          prev[j - 1] + cost,
         );
       }
+      [prev, curr] = [curr, prev];
     }
 
-    return matrix[len2][len1];
+    return prev[len2];
   }
 
   /**
@@ -613,7 +617,10 @@ For each term, provide:
       const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const cacheKey = `regex_${escaped}`;
 
-      // Check if regex is cached
+      // Check if regex is cached (evict all if cache grows too large)
+      if (this.regexCache.size > 500) {
+        this.regexCache.clear();
+      }
       if (!this.regexCache.has(cacheKey)) {
         this.regexCache.set(cacheKey, new RegExp(escaped, "gi"));
       }
@@ -674,19 +681,23 @@ For each term, provide:
 2. Pro-drop (subject omission) frequency.
 3. Onomatopoeia (Gitaigo/Giseigo) textures.
 4. Honorifics (Keigo/Sampu) and social hierarchy.
-5. Internal thoughts (Maru-kakko).`
+5. Internal thoughts (Maru-kakko).
+
+CRITICAL: All generated strings in your JSON response (including the narrativeAnalysis summary, emotionalTone primary, setting, characters, keyEvents, and all linguistic descriptions) MUST be written in fluent English.`
           : `Analyze the Chinese narrative structure for:
 1. Topic Prominence (Topic-Comment) and foregrounding.
 2. Face-system (面子) dynamics and social shame.
 3. Pacing rhythm (Kuai/Man).
 4. Four-character idioms (Chengyu).
-5. Jianghu/Xianxia elements (Cultivation, martial power).`;
+5. Jianghu/Xianxia elements (Cultivation, martial power).
+
+CRITICAL: All generated strings in your JSON response (including the narrativeAnalysis summary, emotionalTone primary, faceSystem descriptions, and all linguistic/Chengyu descriptions/meanings) MUST be written in fluent English.`;
 
       const messages = [
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content: `Analyze this scene text:\n\n${scene.rawText}`,
+          content: `Analyze this scene text:\n\n${scene.rawText}\n\nIMPORTANT REMINDER: You MUST output all JSON values in fluent English. Do NOT output Chinese or Japanese.`,
         },
       ];
 

@@ -105,7 +105,7 @@ router.post("/", async (req, res) => {
 
     // Forward
     const response = await axios.post(LM_STUDIO_CHAT_ENDPOINT, lmRequest, {
-      timeout: 30000, // 30 second timeout for LLM responses
+      timeout: 900000, // 15 min timeout to match llmClient
     });
 
     // Return response

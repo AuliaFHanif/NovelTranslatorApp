@@ -1,21 +1,11 @@
-const OpenAI = require("openai");
+const llmClient = require("./llmClient");
 const { resolveModel } = require("./resolveModel");
-
-const client = new OpenAI({
-  baseURL: normalizeBaseUrl(process.env.OLLAMA_URL || process.env.LM_STUDIO_URL),
-  apiKey: process.env.OLLAMA_API_KEY || process.env.LM_STUDIO_API_KEY || "ollama",
-});
-
-function normalizeBaseUrl(url) {
-  const base = (url || process.env.OLLAMA_URL || process.env.LM_STUDIO_URL || "http://localhost:8080").replace(/\/+$/, "");
-  return base.endsWith("/v1") ? base : `${base}/v1`;
-}
 
 /**
  * Helper to extract the starting transition hook of a paragraph
  * Keeps the first ~800 characters and cuts cleanly at a sentence end if possible.
  */
-function compressParagraph(text, maxLength = 800) {
+function compressParagraph(text, maxLength = 300) {
   const trimmed = text.trim();
   if (trimmed.length <= maxLength) return trimmed;
   
@@ -63,7 +53,11 @@ Analyze the provided paragraphs and partition them into logical, individual scen
 
 You must return a valid JSON object containing an array of the starting paragraph indices (0-indexed) for each scene.
 Example Output:
-{"scene_starts": [0, 2, 5]}`
+{"scene_starts": [0, 2, 5]}
+
+CRITICAL RULES FOR REASONING AND OUTPUT:
+1. Keep your internal thinking/reasoning process extremely brief (under 2 sentences total). Do NOT perform a detailed step-by-step or paragraph-by-paragraph analysis in your thoughts.
+2. Do NOT write any explanations, introductory text, or summaries in the final response. The final response must consist ONLY of the valid JSON object itself, with absolutely no other text.`
     },
     {
       role: "user",
@@ -76,7 +70,7 @@ ${paragraphs.map((p, i) => `[Paragraph ${i}]\n${useFullText ? p.text : compressP
   console.log(`[Segmentation] Calling AI model (${model}) to segment ${paragraphs.length} paragraphs...`);
   
   // Call AI with flexible json_object format and high max_tokens to accommodate reasoning models
-  const response = await client.chat.completions.create({
+  const content = await llmClient.chatCompletion({
     model,
     messages,
     response_format: { type: "json_object" },
@@ -84,7 +78,6 @@ ${paragraphs.map((p, i) => `[Paragraph ${i}]\n${useFullText ? p.text : compressP
     max_tokens: 4000, // Generous token limit to prevent Qwen reasoning truncation
   });
 
-  const content = response?.choices?.[0]?.message?.content;
   if (!content) {
     throw new Error("AI returned empty content during segmentation.");
   }

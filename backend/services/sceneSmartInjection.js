@@ -6,15 +6,13 @@ const {
   TermAppearance,
 } = require("../models");
 const { Op } = require("sequelize");
-const llmClient = require("./llmClient");
-const TextMetrics = require("../utils/textMetrics");
 
 class SceneSmartInjectionService {
   /**
    * Get terms for scene translation - optimized with pre-extracted data
    */
   async getTermsForScene(sceneId, options = {}) {
-    const { limit = 80, maxGlossaryTokens = 600 } = options;
+    const { limit = 80 } = options;
 
     const scene = await Scene.findByPk(sceneId, {
       include: [
@@ -28,8 +26,13 @@ class SceneSmartInjectionService {
 
     if (!scene) throw new Error(`Scene ${sceneId} not found`);
 
-    // Ensure we have extracted terms
-    if (!scene.glossaryTermIds || scene.glossaryTermIds.length === 0) {
+    // Only re-extract if glossaryTermIds haven't been computed yet, or force is requested
+    const needsExtraction =
+      options.force ||
+      !scene.glossaryTermIds ||
+      scene.glossaryTermIds.length === 0;
+
+    if (needsExtraction) {
       await this.extractAndStore(scene);
     }
 
@@ -81,7 +84,6 @@ class SceneSmartInjectionService {
       glossaryText: this.formatGlossaryBlock(
         limitedTerms,
         scene.Chapter.Series.language,
-        maxGlossaryTokens,
       ),
     };
   }
@@ -128,11 +130,10 @@ class SceneSmartInjectionService {
     return matchedTermIds;
   }
 
-  formatGlossaryBlock(terms, language, maxGlossaryTokens = 600) {
+  formatGlossaryBlock(terms, language) {
     const termField = language === "ja" ? "termJa" : "termZh";
 
     const lines = [];
-    let runningTokens = 0;
 
     for (const term of terms) {
       const source = term[termField] || term.canonicalForm;
@@ -142,14 +143,8 @@ class SceneSmartInjectionService {
       const freq = term.frequency ? ` (freq:${term.frequency})` : "";
       const def = term.definition ? ` - ${term.definition}` : "";
       const line = `- ${type} ${source} -> ${term.termEn}${freq}${def}`.trim();
-      const lineTokens = TextMetrics.estimateTokens(line);
-
-      if (runningTokens + lineTokens > maxGlossaryTokens) {
-        break;
-      }
 
       lines.push(line);
-      runningTokens += lineTokens;
     }
 
     return lines.join("\n");

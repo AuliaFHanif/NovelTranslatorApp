@@ -977,3 +977,79 @@ export async function bulkApproveTermsToScene(seriesId: number, language: string
     body: JSON.stringify({ seriesId, language, terms }),
   });
 }
+
+export async function streamSceneTranslation(
+  sceneId: number,
+  model: string,
+  onChunk: (text: string) => void,
+): Promise<void> {
+  const url = `${API_BASE_URL}/scenes/${sceneId}/translate/stream`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to start stream: ${response.statusText}`);
+  }
+
+  const reader = response.body?.getReader();
+  const decoder = new TextDecoder();
+
+  if (!reader) return;
+
+  let lineBuffer = ""; // Buffer incomplete lines across reads
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      lineBuffer += decoder.decode(value, { stream: true });
+      const lines = lineBuffer.split("\n");
+
+      // Keep the last element — it may be an incomplete line
+      lineBuffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const dataStr = line.slice(6).trim();
+          if (dataStr === "[DONE]") continue;
+
+          try {
+            const data = JSON.parse(dataStr);
+            if (data.error) {
+              throw new Error(data.error);
+            }
+            if (data.content) {
+              onChunk(data.content);
+            }
+          } catch (e) {
+            // Only swallow JSON parse errors (partial chunks)
+            // Re-throw actual application errors
+            if (!(e instanceof SyntaxError)) {
+              throw e;
+            }
+          }
+        }
+      }
+    }
+
+    // Process any remaining buffered data
+    if (lineBuffer.startsWith("data: ")) {
+      const dataStr = lineBuffer.slice(6).trim();
+      if (dataStr && dataStr !== "[DONE]") {
+        try {
+          const data = JSON.parse(dataStr);
+          if (data.error) throw new Error(data.error);
+          if (data.content) onChunk(data.content);
+        } catch (e) {
+          if (!(e instanceof SyntaxError)) throw e;
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}

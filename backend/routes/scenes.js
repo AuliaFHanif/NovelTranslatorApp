@@ -6,6 +6,7 @@ const scenePolish = require("../services/scenePolishService");
 const sceneLexicographer = require("../services/sceneLexicographerService");
 const { Scene, Chapter, GlossaryTerm } = require("../models");
 const { clearCache } = require("../services/glossaryCache");
+const llmClient = require("../services/llmClient");
 
 function normalizeTermText(text) {
   if (!text || typeof text !== "string") return "";
@@ -63,17 +64,21 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-// PATCH /api/scenes/:id - Update scene text or translated text
+// PATCH /api/scenes/:id - Update scene attributes (text, translation, polish, status)
 router.patch("/:id", async (req, res) => {
   try {
-    const { rawText, translatedText } = req.body;
+    const { rawText, translatedText, finalText, polishEdits, status } = req.body;
 
-    // If updating translated text only
-    if (translatedText !== undefined && !rawText) {
+    // If updating attributes without modifying rawText
+    if (!rawText && (translatedText !== undefined || finalText !== undefined || polishEdits !== undefined || status !== undefined)) {
       const scene = await Scene.findByPk(req.params.id);
       if (!scene) return res.status(404).json({ error: "Scene not found" });
 
-      scene.translatedText = translatedText;
+      if (translatedText !== undefined) scene.translatedText = translatedText;
+      if (finalText !== undefined) scene.finalText = finalText;
+      if (polishEdits !== undefined) scene.polishEdits = polishEdits;
+      if (status !== undefined) scene.status = status;
+
       await scene.save();
 
       return res.json({
@@ -104,6 +109,109 @@ router.post("/:id/translate", async (req, res) => {
     res.json({ success: true, data: result });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/scenes/:id/translate/stream - Stream translate scene
+router.post("/:id/translate/stream", async (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const sceneId = req.params.id;
+  try {
+    const { messages, model, scene, context, prompt } =
+      await sceneTranslation.buildSceneTranslationContext(sceneId, req.body);
+
+    const stream = await llmClient.streamChatCompletion({
+      model,
+      messages,
+      temperature: req.body.temperature ?? 0.3,
+      top_p: req.body.top_p ?? 0.95,
+      max_tokens: req.body.max_tokens || 16384,
+    });
+
+    let fullText = "";
+    let tempBuffer = "";
+    let inThink = false;
+    let inAnalysis = false;
+
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content || "";
+      if (!content) continue;
+
+      fullText += content;
+
+      let toSend = "";
+      for (let i = 0; i < content.length; i++) {
+        const char = content[i];
+        tempBuffer += char;
+
+        if (tempBuffer.endsWith("<think>")) {
+          inThink = true;
+          tempBuffer = "";
+        } else if (tempBuffer.endsWith("</think>")) {
+          inThink = false;
+          tempBuffer = "";
+        } else if (tempBuffer.endsWith("<analysis>")) {
+          inAnalysis = true;
+          tempBuffer = "";
+        } else if (tempBuffer.endsWith("</analysis>")) {
+          inAnalysis = false;
+          tempBuffer = "";
+        } else {
+          while (tempBuffer.length > 0 && !tempBuffer.startsWith("<")) {
+            const outputChar = tempBuffer[0];
+            tempBuffer = tempBuffer.slice(1);
+            if (!inThink && !inAnalysis) {
+              toSend += outputChar;
+            }
+          }
+
+          if (tempBuffer.startsWith("<")) {
+            const maxTagLen = 11;
+            const isValidPartialTag = /^[<\/>a-z]*$/.test(tempBuffer);
+            if (tempBuffer.length > maxTagLen || !isValidPartialTag) {
+              const outputChar = tempBuffer[0];
+              tempBuffer = tempBuffer.slice(1);
+              if (!inThink && !inAnalysis) {
+                toSend += outputChar;
+              }
+            }
+          }
+        }
+      }
+
+      if (toSend) {
+        res.write(`data: ${JSON.stringify({ content: toSend })}\n\n`);
+      }
+    }
+
+    if (tempBuffer && !inThink && !inAnalysis) {
+      res.write(`data: ${JSON.stringify({ content: tempBuffer })}\n\n`);
+    }
+
+    // Process complete text database updates after stream completes successfully
+    const cleaned = sceneTranslation.stripThinking(fullText);
+    const summary = await sceneTranslation.generateContextSummary(cleaned);
+
+    await scene.update({
+      translatedText: cleaned,
+      status: "translated",
+      contextSummary: summary,
+    });
+
+    res.write("data: [DONE]\n\n");
+    res.end();
+  } catch (error) {
+    console.error("[Streaming Translation Error]:", error);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: error.message });
+    } else {
+      res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+      res.end();
+    }
   }
 });
 
@@ -234,16 +342,6 @@ router.post("/bulk-approve-terms", async (req, res) => {
   }
 });
 
-// DELETE /api/scenes/:id
-router.delete("/:id", async (req, res) => {
-  try {
-    const result = await sceneCreation.deleteScene(req.params.id);
-    res.json({ success: true, ...result });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 // DELETE /api/scenes/chapters/:chapterId - Bulk delete all scenes for a chapter
 router.delete("/chapters/:chapterId", async (req, res) => {
   try {
@@ -251,6 +349,16 @@ router.delete("/chapters/:chapterId", async (req, res) => {
       where: { chapterId: req.params.chapterId },
     });
     res.json({ success: true, deletedCount });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// DELETE /api/scenes/:id
+router.delete("/:id", async (req, res) => {
+  try {
+    const result = await sceneCreation.deleteScene(req.params.id);
+    res.json({ success: true, ...result });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
