@@ -9,7 +9,8 @@ const seriesRoutes = require("./routes/series");
 const proxyRoutes = require("./routes/proxy");
 const translationRoutes = require("./routes/translation");
 const settingsRoutes = require("./routes/settings");
-const lexicographerRoutes = require("./routes/lexicographer");
+const sceneRoutes = require("./routes/scenes");
+const glossaryRoutes = require("./routes/glossary");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -32,7 +33,8 @@ app.use("/api/llm", proxyRoutes);
 app.use("/api/health", proxyRoutes);
 app.use("/api/translation", translationRoutes);
 app.use("/api/settings", settingsRoutes);
-app.use("/api", lexicographerRoutes);
+app.use("/api/scenes", sceneRoutes);
+app.use("/api/glossary-terms", glossaryRoutes);
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -65,9 +67,9 @@ sequelize
       console.log(`  - GET  /api/chapters/:id   (get chapter)`);
       console.log(`  - POST /api/llm            (LM Studio proxy)`);
       console.log(`  - GET  /api/health         (service health)`);
-      console.log(`  - GET  /api/translation/chapters/:chapterId`);
-      console.log(`  - POST /api/translation/acts/:actId/pass`);
-      console.log(`  - POST /api/translation/chapters/:chapterId/pass`);
+      console.log(`  - GET  /api/scenes/chapters/:chapterId`);
+      console.log(`  - POST /api/scenes/:id/translate`);
+      console.log(`  - POST /api/scenes/:id/polish`);
     });
   })
   .catch((err) => {

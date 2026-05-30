@@ -1,11 +1,7 @@
 const express = require("express");
 const router = express.Router();
-const { Series, Chapter, Act } = require("../models");
-const {
-  runArchitectPhase,
-  updateAct,
-  deleteAct,
-} = require("../controllers/architectController");
+const { Series, Chapter, Scene } = require("../models");
+const sceneCreation = require("../services/sceneCreation");
 
 /**
  * GET /api/chapters
@@ -102,7 +98,27 @@ router.post("/", async (req, res) => {
  * POST /api/chapters/:chapterId/architect
  * Run Phase 2 Architect segmentation for a chapter
  */
-router.post("/:chapterId/architect", runArchitectPhase);
+/**
+ * POST /api/chapters/:chapterId/architect
+ * Run Scene segmentation for a chapter (Legacy name preserved for frontend compatibility)
+ */
+router.post("/:chapterId/architect", async (req, res) => {
+  try {
+    const chapterId = Number(req.params.chapterId);
+    const chapter = await Chapter.findByPk(chapterId);
+    if (!chapter) return res.status(404).json({ error: "Chapter not found" });
+
+    const scenes = await sceneCreation.createScenesFromChapter(
+      chapter.id,
+      chapter.rawText,
+      req.body
+    );
+
+    res.json({ success: true, actsCreated: scenes.length, data: scenes });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 /**
  * GET /api/chapters/:id
@@ -119,7 +135,7 @@ router.get("/:id", async (req, res) => {
           as: "Series",
           attributes: ["id", "title", "language"],
         },
-        { model: Act, as: "Acts" },
+        { model: Scene, as: "Scenes" },
       ],
     });
 
@@ -193,17 +209,29 @@ router.delete("/:id", async (req, res) => {
 });
 
 /**
- * PATCH /api/acts/:id
- * Update an act's raw text
- * If word count exceeds MAX_WORDS, auto-splits at paragraph boundaries
+ * PATCH /api/chapters/acts/:id
+ * Update a scene's raw text (Frontend still uses /acts naming in some places)
  */
-router.patch("/acts/:id", updateAct);
+router.patch("/acts/:id", async (req, res) => {
+  try {
+    const { rawText } = req.body;
+    const result = await sceneCreation.updateScene(req.params.id, rawText);
+    res.json({ success: true, wasSplit: result.split, data: result.scene || result.scenes });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 /**
- * DELETE /api/acts/:id
- * Delete an act
- * Keeps GlossaryTerms in library but removes TermAppearances for this act
+ * DELETE /api/chapters/acts/:id
  */
-router.delete("/acts/:id", deleteAct);
+router.delete("/acts/:id", async (req, res) => {
+  try {
+    const result = await sceneCreation.deleteScene(req.params.id);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 module.exports = router;

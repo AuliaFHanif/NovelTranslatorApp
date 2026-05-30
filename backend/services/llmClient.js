@@ -4,15 +4,15 @@ const OpenAI = require("openai");
  * Normalizes LM Studio base URL to ensure it ends with /v1
  */
 function normalizeBaseUrl(url) {
-  const base = (url || "http://localhost:1234").replace(/\/+$/, "");
+  const base = (url || process.env.OLLAMA_URL || process.env.LM_STUDIO_URL || "http://localhost:8080").replace(/\/+$/, "");
   return base.endsWith("/v1") ? base : `${base}/v1`;
 }
 
 class LLMClient {
   constructor() {
     this.client = new OpenAI({
-      baseURL: normalizeBaseUrl(process.env.LM_STUDIO_URL),
-      apiKey: process.env.LM_STUDIO_API_KEY || "lm-studio",
+      baseURL: normalizeBaseUrl(process.env.OLLAMA_URL || process.env.LM_STUDIO_URL),
+      apiKey: process.env.OLLAMA_API_KEY || process.env.LM_STUDIO_API_KEY || "ollama",
       timeout: parseInt(process.env.LLM_TIMEOUT) || 900000, // 15 min default
     });
   }
@@ -48,10 +48,10 @@ class LLMClient {
 
   _handleError(error) {
     if (error.code === "ECONNREFUSED") {
-      throw new Error("LM Studio service unavailable. Please check if it is running.");
+      throw new Error("Ollama / LM Studio service unavailable. Please check if it is running on the configured port.");
     }
     if (error.code === "ECONNABORTED" || error.name === "TimeoutError") {
-      throw new Error("LM Studio request timed out.");
+      throw new Error("Ollama / LM Studio request timed out.");
     }
     throw error;
   }

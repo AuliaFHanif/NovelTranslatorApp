@@ -11,18 +11,18 @@ module.exports = (sequelize, DataTypes) => {
         });
       }
 
-      if (models.Act) {
-        Chapter.hasMany(models.Act, { 
+      if (models.Scene) {
+        Chapter.hasMany(models.Scene, { 
           foreignKey: 'chapterId',
-          as: 'Acts'
+          as: 'Scenes'
         });
       }
     }
 
-    // Get acts ordered by sequence
-    async getOrderedActs() {
-      if (!this.getActs) return [];
-      return await this.getActs({
+    // Get scenes ordered by sequence
+    async getOrderedScenes() {
+      if (!this.getScenes) return [];
+      return await this.getScenes({
         order: [['sequence', 'ASC']]
       });
     }

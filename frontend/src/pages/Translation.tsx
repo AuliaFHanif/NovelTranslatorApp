@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Button } from "../components/ui/button";
 import {
@@ -21,24 +21,20 @@ import {
   getTranslationChapter,
   listAIModels,
   API_BASE_URL,
-  // ... (omitting lines 17-858 for brevity in this specific tool call, but I will provide the full replacement for the target block)
-  runArchitectPhase,
-  runChapterAnalysis,
-  runActAnalysis,
-  runActGroupAnalysis,
-  getActTranslationPrompt,
-  runChapterPass,
-  updateAct,
-  deleteAct,
-  deleteAllActs,
-  exportChapterResult,
-  updateSubActTranslation,
-  updateActTranslation,
-  type Act,
+  // New Scene API
+  getScenes,
+  runSceneSegmentation,
+  translateScene,
+  polishScene,
+  updateSceneRawText,
+  deleteScene,
+  deleteAllScenes,
+  extractSceneTerms,
+  analyzeScene,
   type AIModel,
-  type TranslationChapter,
   type GlossaryCandidate,
 } from "../lib/api";
+import type { Scene, Chapter } from "../types/scene";
 import {
   showError,
   showInfo,
@@ -47,15 +43,13 @@ import {
 } from "../lib/notifications";
 import { Badge } from "../components/ui/badge";
 import { GlossaryApprovalDialog } from "../components/GlossaryApprovalDialog";
-import { PromptViewerDialog } from "../components/PromptViewerDialog";
-import { ActAnalysisCard } from "../components/ActAnalysisCard";
-import { PolishSelector } from "../components/PolishSelector";
+import { PolishSelectionPanel } from "../components/PolishSelectionPanel";
 
 export function Translation() {
   const [searchParams] = useSearchParams();
-  const [chapter, setChapter] = useState<TranslationChapter | null>(null);
-  const [acts, setActs] = useState<Act[]>([]);
-  const [selectedActId, setSelectedActId] = useState<number | null>(null);
+  const [chapter, setChapter] = useState<Chapter | null>(null);
+  const [scenes, setScenes] = useState<Scene[]>([]);
+  const [selectedSceneId, setSelectedSceneId] = useState<number | null>(null);
   const [editableTranslation, setEditableTranslation] = useState("");
   const [isLoadingChapter, setIsLoadingChapter] = useState(true);
   const [isRunningPass, setIsRunningPass] = useState(false);
@@ -66,76 +60,47 @@ export function Translation() {
   const [apiStatus, setApiStatus] = useState<
     "idle" | "testing" | "ok" | "error"
   >("idle");
+
+  const [isEditingScene, setIsEditingScene] = useState(false);
+  const [editSceneText, setEditSceneText] = useState("");
+  const [isSceneSaving, setIsSceneSaving] = useState(false);
+
+  const [isExtractingTerms, setIsExtractingTerms] = useState(false);
+  const [isAnalyzingScene, setIsAnalyzingScene] = useState(false);
   const [extractedTerms, setExtractedTerms] = useState<GlossaryCandidate[]>([]);
   const [isGlossaryDialogOpen, setIsGlossaryDialogOpen] = useState(false);
-  const [isPreviewPromptOpen, setIsPreviewPromptOpen] = useState(false);
-  const [currentPrompt, setCurrentPrompt] = useState<Array<{
-    role: string;
-    content: string;
-  }> | null>(null);
-  const [isFetchingPrompt, setIsFetchingPrompt] = useState(false);
-  // Act edit mode state
-  const [isEditingAct, setIsEditingAct] = useState(false);
-  const [editActText, setEditActText] = useState("");
-  const [isActMetadataLoading, setIsActMetadataLoading] = useState(false);
-
-  // Polish UI state
-  const [actPolishes, setActPolishes] = useState<
-    Array<{
-      id: number;
-      reason: string;
-      isSelected: boolean;
-    }>
-  >([]);
-  const [isGeneratingPolish, setIsGeneratingPolish] = useState(false);
+  const [failedExtractionScenes, setFailedExtractionScenes] = useState<
+    Set<number>
+  >(new Set());
+  const [failedAnalysisScenes, setFailedAnalysisScenes] = useState<Set<number>>(
+    new Set(),
+  );
+  const [polishPanelVisible, setPolishPanelVisible] = useState(true);
 
   const seriesId = Number(searchParams.get("seriesId") || "0");
   const chapterId = Number(searchParams.get("chapterId") || "0");
 
-  const selectedAct = useMemo(() => {
-    // First, check if it's an Act ID
-    const act = acts.find((act) => act.id === selectedActId);
-    if (act) return act;
-
-    // Then, check if it's a SubAct ID
-    for (const act of acts) {
-      if (act.SubActs) {
-        for (const subAct of act.SubActs) {
-          if (subAct.id === selectedActId) {
-            // Return subAct as act-like object for compatibility
-            // Include parent Act's Analysis so we can display it
-            return {
-              ...subAct,
-              // Add act fields for compatibility
-              sequence: `${act.sequence}.${subAct.sequence}`,
-              label: `Act ${act.sequence} - SubAct ${subAct.sequence}`,
-              // Include parent Act's Analysis for panel display
-              Analysis: act.Analysis,
-            } as any;
-          }
-        }
-      }
-    }
-    return null;
-  }, [acts, selectedActId]);
+  const selectedScene = useMemo(() => {
+    return scenes.find((s) => s.id === selectedSceneId) || null;
+  }, [scenes, selectedSceneId]);
 
   const progress = useMemo(
     () => ({
-      total: acts.length,
-      pass1Done: acts.length, // If acts exist, Architect is done
-      pass2Done: acts.filter((act) =>
-        Boolean(act.Analysis?.anatomyProfile?.linguistic),
+      total: scenes.length,
+      segmented: scenes.length > 0,
+      translated: scenes.filter(
+        (s) =>
+          s.status === "translated" ||
+          s.status === "polished" ||
+          s.status === "complete",
       ).length,
-      pass3Done: acts.filter((act) =>
-        Boolean(act.anatomyProfile?.finalTranslation),
-      ).length,
-      pass4Done: acts.filter((act) =>
-        Boolean(act.anatomyProfile?.pass4Polished),
+      polished: scenes.filter(
+        (s) => s.status === "polished" || s.status === "complete",
       ).length,
     }),
-
-    [acts],
+    [scenes],
   );
+
   const isLmStudioOnline = apiStatus === "ok";
 
   useEffect(() => {
@@ -169,12 +134,9 @@ export function Translation() {
 
   useEffect(() => {
     setEditableTranslation(
-      selectedAct?.translatedText ||
-        selectedAct?.anatomyProfile?.finalTranslation ||
-        selectedAct?.anatomyProfile?.draftTranslation ||
-        "",
+      selectedScene?.finalText || selectedScene?.translatedText || "",
     );
-  }, [selectedAct]);
+  }, [selectedScene]);
 
   async function loadTranslationChapter() {
     if (
@@ -198,17 +160,18 @@ export function Translation() {
         throw new Error("No response from server");
       }
 
-      setChapter(response.chapter);
-      const actsArr = response.acts || [];
-      setActs(actsArr);
+      setChapter(response.chapter as unknown as Chapter);
 
-      setSelectedActId((current) => {
+      const scenesData = await getScenes(chapterId);
+      setScenes(scenesData);
+
+      setSelectedSceneId((current) => {
         if (!current) {
-          return actsArr[0]?.id ?? null;
+          return scenesData[0]?.id ?? null;
         }
 
-        const stillExists = actsArr.some((act) => act.id === current);
-        return stillExists ? current : (actsArr[0]?.id ?? null);
+        const stillExists = scenesData.some((s) => s.id === current);
+        return stillExists ? current : (scenesData[0]?.id ?? null);
       });
     } catch (error) {
       await showError(
@@ -222,371 +185,208 @@ export function Translation() {
     }
   }
 
-  async function handleTranslateAct(pass: 3 | 4 = 3) {
-    if (!selectedAct) {
-      await showInfo("No Act Selected", "Select an act before translating.");
-      return;
-    }
+  const handleApplyPolishEdits = useCallback(
+    async (appliedEdits: import("../types/scene").PolishEdit[]) => {
+      if (!selectedScene) return;
 
-    if (pass === 4 && !selectedAct.anatomyProfile?.finalTranslation) {
-      await showInfo(
-        "Translate First",
-        "Run Pass 3 (Translate) before polishing.",
-      );
+      let computedText = selectedScene.translatedText || "";
+      for (const edit of appliedEdits) {
+        if (edit.applied) {
+          computedText = computedText.replace(edit.original, edit.replacement);
+        }
+      }
+
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/scenes/${selectedScene.id}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              translatedText: computedText,
+              polishEdits: appliedEdits,
+            }),
+          },
+        );
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || `HTTP ${response.status}`);
+        }
+
+        await loadTranslationChapter();
+        await showSuccess("Polish Applied", `Applied ${appliedEdits.filter((e) => e.applied).length} edits successfully.`);
+      } catch (error) {
+        await showError(
+          "Apply Failed",
+          error instanceof Error ? error.message : "Unable to apply polish edits.",
+        );
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedScene],
+  );
+
+  async function handleTranslateScene() {
+    if (!selectedScene) {
+      await showInfo("No Scene Selected", "Select a scene before translating.");
       return;
     }
 
     if (!isLmStudioOnline) {
       await showError(
-        "LM Studio Offline",
-        "Cannot translate while LM Studio is offline.",
+        "Ollama Offline",
+        "Cannot translate while Ollama is offline.",
       );
       return;
     }
 
     try {
       setIsRunningPass(true);
-      setEditableTranslation(""); // Clear before streaming
-
-      // If selected item is a SubAct, use that directly; otherwise use Act's SubActs
-      let url: string;
-      const isSubAct = selectedAct.actId !== undefined;
-
-      if (isSubAct) {
-        // Translate only this specific SubAct
-        url = `${API_BASE_URL}/translation/subacts/${selectedAct.id}/stream?model=${encodeURIComponent(modelName)}&pass=${pass}`;
-      } else {
-        // Translate all SubActs of this Act
-        url = `${API_BASE_URL}/translation/acts/${selectedAct.id}/stream?model=${encodeURIComponent(modelName)}&pass=${pass}`;
-      }
-
-      const response = await fetch(url, { method: "POST" });
-
-      if (!response.ok) {
-        throw new Error(`Failed to start stream: ${response.statusText}`);
-      }
-
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      let streamCompleted = false;
-      let hadError = false;
-
-      if (reader) {
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) {
-              // Stream ended - check if we got [DONE] signal
-              if (!streamCompleted) {
-                console.warn(
-                  "Stream ended without [DONE] signal - connection may have been lost",
-                );
-              }
-              break;
-            }
-
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split("\n");
-
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                const dataStr = line.slice(6).trim();
-
-                // Check for completion signal
-                if (dataStr === "[DONE]") {
-                  streamCompleted = true;
-                  continue;
-                }
-
-                try {
-                  const data = JSON.parse(dataStr);
-
-                  // Check for error messages in the content
-                  if (data.content && data.content.startsWith("ERROR:")) {
-                    hadError = true;
-                    const errorMsg = data.content.substring(6).trim();
-                    console.error("Stream error:", errorMsg);
-                    throw new Error(`LM Studio error: ${errorMsg}`);
-                  }
-
-                  if (data.content) {
-                    setEditableTranslation((prev) => prev + data.content);
-                  }
-                } catch (e) {
-                  // If it's our thrown error, re-throw it
-                  if (
-                    e instanceof Error &&
-                    e.message.startsWith("LM Studio error:")
-                  ) {
-                    throw e;
-                  }
-                  // Otherwise just log parse errors
-                  console.debug("Parse error on chunk:", dataStr, e);
-                }
-              }
-            }
-          }
-        } finally {
-          reader.releaseLock();
-        }
-      }
-
-      // Throw error if stream didn't complete properly
-      if (!streamCompleted && !hadError) {
-        throw new Error(
-          "Stream interrupted. The LM Studio server may have stopped or connection was lost.",
-        );
-      }
-
+      await translateScene(selectedScene.id, { model: modelName });
       await loadTranslationChapter();
       await showSuccess(
-        pass === 4 ? "Polish Completed" : "Translation Completed",
-        `Act ${selectedAct.sequence} has been ${pass === 4 ? "polished" : "translated"}.`,
+        "Translation Completed",
+        `Scene ${selectedScene.sequence} has been translated.`,
       );
     } catch (error) {
       await showError(
-        "Process Failed",
-        error instanceof Error ? error.message : "Unable to process act.",
+        "Translation Failed",
+        error instanceof Error ? error.message : "Unable to translate scene.",
       );
     } finally {
       setIsRunningPass(false);
     }
   }
 
-  async function handleShowPrompt() {
-    if (!selectedAct) {
-      await showInfo("No Act Selected", "Select an act before viewing prompt.");
-      return;
-    }
-
-    try {
-      setIsFetchingPrompt(true);
-
-      // Check if selected item is a SubAct (has actId property from parent Act)
-      const isSubAct = selectedAct.actId !== undefined;
-      let actIdToUse = selectedAct.id;
-
-      if (isSubAct) {
-        // If it's a SubAct, find its parent Act and use that ID
-        const parentAct = acts.find((act) =>
-          act.SubActs?.some((subAct) => subAct.id === selectedAct.id),
-        );
-        if (parentAct) {
-          actIdToUse = parentAct.id;
-        }
-      }
-
-      const data = await getActTranslationPrompt(actIdToUse, modelName);
-      setCurrentPrompt(data.messages);
-      setIsPreviewPromptOpen(true);
-    } catch (error) {
-      await showError(
-        "Failed to Load Prompt",
-        error instanceof Error
-          ? error.message
-          : "Unable to retrieve prompt context.",
-      );
-    } finally {
-      setIsFetchingPrompt(false);
-    }
-  }
-
-  /**
-   * Detect if an act is part of a group (e.g., 1A, 1B are grouped)
-   * Returns array of all act IDs in the same group
-   */
-  function detectActGroup(actId: number): number[] {
-    const targetAct = acts.find((a) => a.id === actId);
-    if (!targetAct) return [actId];
-
-    const label = String(targetAct.label || "");
-    const baseLabel = label.replace(/[A-Z]$/, ""); // Remove suffix if present
-
-    if (!baseLabel || baseLabel === label) {
-      // No grouping detected
-      return [actId];
-    }
-
-    // Find all acts with same base label
-    const groupActs = acts.filter((a) => {
-      const aLabel = String(a.label || "");
-      const aBaseLabel = aLabel.replace(/[A-Z]$/, "");
-      return aBaseLabel === baseLabel;
-    });
-
-    return groupActs.sort((a, b) => a.sequence - b.sequence).map((a) => a.id);
-  }
-
-  async function handleAnalyzeAct(task: "terms" | "narrative") {
-    if (!selectedAct) {
-      await showInfo("No Act Selected", "Select an act before analyzing.");
-      return;
-    }
-
-    if (!isLmStudioOnline) {
-      await showError(
-        "LM Studio Offline",
-        "Cannot analyze while LM Studio is offline.",
-      );
+  async function handlePolishScene() {
+    if (!selectedScene) {
+      await showInfo("No Scene Selected", "Select a scene before polishing.");
       return;
     }
 
     try {
       setIsRunningPass(true);
-
-      // Detect act group and analyze all together if part of a group
-      const groupActIds = detectActGroup(selectedAct.id);
-      const isGrouped = groupActIds.length > 1;
-      const groupActLabels = acts
-        .filter((a) => groupActIds.includes(a.id))
-        .map((a) => a.label);
-
-      if (isGrouped) {
-        await showInfo(
-          "Grouped Analysis",
-          `Analyzing acts: ${groupActLabels.join(", ")} together...`,
-        );
-      }
-
-      const result = isGrouped
-        ? await runActGroupAnalysis(chapter!.id, groupActIds, {
-            model: modelName,
-            task,
-          })
-        : await runActAnalysis(selectedAct.id, {
-            model: modelName,
-            task,
-          });
-
+      await polishScene(selectedScene.id, { model: modelName });
       await loadTranslationChapter();
-
-      if (result.failed && result.failed.length > 0) {
-        await showError(
-          "Analysis Failed",
-          `${result.failed[0]?.label || "Unknown"}: ${result.failed[0]?.error || "Unknown error"}`,
-        );
-      }
-
-      if (isGrouped && groupActLabels.length > 0) {
-        await showSuccess(
-          "Group Analysis Complete",
-          `Acts ${groupActLabels.join(", ")} analyzed with shared results.`,
-        );
-      }
-
-      if (result.terms && result.terms.length > 0) {
-        setExtractedTerms(result.terms);
-        setIsGlossaryDialogOpen(true);
-      } else if (task === "terms") {
-        await showSuccess(
-          "Term Extraction Complete",
-          "No new terms identified.",
-        );
-      } else if (task === "narrative") {
-        await showSuccess(
-          "Narrative Analysis Complete",
-          "Analysis profile updated.",
-        );
-      }
+      await showSuccess(
+        "Polish Completed",
+        `Scene ${selectedScene.sequence} has been polished.`,
+      );
     } catch (error) {
       await showError(
-        "Analysis Failed",
-        error instanceof Error ? error.message : "Unable to analyze act.",
+        "Polish Failed",
+        error instanceof Error ? error.message : "Unable to polish scene.",
       );
     } finally {
       setIsRunningPass(false);
     }
   }
 
-  function handleEditActStart() {
-    if (!selectedAct) return;
-    setEditActText(selectedAct.rawText);
-    setIsEditingAct(true);
+  function handleEditSceneStart() {
+    if (!selectedScene) return;
+    setEditSceneText(selectedScene.rawText);
+    setIsEditingScene(true);
   }
 
-  async function handleEditActSave() {
-    if (!selectedAct) return;
-
-    const wordCount = editActText.trim().split(/\s+/).length;
-    const MAX_WORDS = 2500;
+  async function handleEditSceneSave() {
+    if (!selectedScene) return;
 
     try {
-      setIsActMetadataLoading(true);
-      const result = await updateAct(selectedAct.id, editActText);
+      setIsSceneSaving(true);
+      const result = await updateSceneRawText(selectedScene.id, editSceneText);
 
-      if (result.wasSplit) {
+      if (result.split) {
         await showSuccess(
-          "Act Split",
-          `Act was split into ${result.updatedActs?.length || 0} acts due to exceeding ${MAX_WORDS} word limit.`,
+          "Scene Split",
+          `Scene was split into multiple scenes due to size.`,
         );
       } else {
-        await showSuccess(
-          "Act Updated",
-          `Act updated successfully. Word count: ${wordCount}`,
-        );
+        await showSuccess("Scene Updated", `Scene updated successfully.`);
       }
 
       await loadTranslationChapter();
-      setIsEditingAct(false);
-      setEditActText("");
+      setIsEditingScene(false);
+      setEditSceneText("");
     } catch (error) {
       await showError(
         "Update Failed",
-        error instanceof Error ? error.message : "Unable to update act.",
+        error instanceof Error ? error.message : "Unable to update scene.",
       );
     } finally {
-      setIsActMetadataLoading(false);
+      setIsSceneSaving(false);
     }
   }
 
-  function handleEditActCancel() {
-    setIsEditingAct(false);
-    setEditActText("");
+  function handleEditSceneCancel() {
+    setIsEditingScene(false);
+    setEditSceneText("");
   }
 
-  async function handleDeleteAct() {
-    if (!selectedAct) return;
+  async function handleDeleteScene() {
+    if (!selectedScene) return;
 
     const confirmed = await showConfirm(
-      "Delete Act?",
-      `Are you sure you want to delete Act ${selectedAct.label}? This will delete any associated translations, polish, and analysis. Terms in the library will be preserved.`,
+      "Delete Scene?",
+      `Are you sure you want to delete this scene? Sequential scenes will be renumbered.`,
     );
 
     if (!confirmed) return;
 
     try {
-      setIsActMetadataLoading(true);
-      await deleteAct(selectedAct.id);
+      setIsSceneSaving(true);
+      await deleteScene(selectedScene.id);
 
-      await showSuccess(
-        "Act Deleted",
-        `Act ${selectedAct.label} has been deleted.`,
-      );
+      await showSuccess("Scene Deleted", `Scene has been deleted.`);
 
       await loadTranslationChapter();
-      setSelectedActId(null);
+      setSelectedSceneId(null);
     } catch (error) {
       await showError(
         "Deletion Failed",
-        error instanceof Error ? error.message : "Unable to delete act.",
+        error instanceof Error ? error.message : "Unable to delete scene.",
       );
     } finally {
-      setIsActMetadataLoading(false);
+      setIsSceneSaving(false);
     }
   }
 
-  async function handleRunChapterPass(
-    pass: 1 | 2 | 3 | 4,
-    task: "all" | "terms" | "narrative" = "all",
-  ) {
-    if (!chapter) {
-      return;
+  async function handleDeleteAllScenes() {
+    if (!chapter) return;
+
+    const confirmed = await showConfirm(
+      "Delete ALL Scenes?",
+      `This will permanently remove all ${scenes.length} scenes and their translations for this chapter. This cannot be undone.`,
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setIsSceneSaving(true);
+      await deleteAllScenes(chapter.id);
+      await showSuccess(
+        "All Scenes Deleted",
+        `Chapter reset to pending status.`,
+      );
+      await loadTranslationChapter();
+      setSelectedSceneId(null);
+    } catch (error) {
+      await showError(
+        "Deletion Failed",
+        error instanceof Error ? error.message : "Unable to delete scenes.",
+      );
+    } finally {
+      setIsSceneSaving(false);
     }
+  }
+
+  async function handleRunChapterPass(pass: 1 | 2 | 3 | 4 | 5) {
+    if (!chapter) return;
 
     if (!isLmStudioOnline) {
       await showError(
-        "LM Studio Offline",
-        "Cannot run passes while LM Studio is offline.",
+        "Ollama Offline",
+        `Cannot run pass ${pass} while Ollama is offline.`,
       );
       return;
     }
@@ -594,124 +394,192 @@ export function Translation() {
     try {
       setIsRunningPass(true);
 
-      // Pass 1: Architect (segment chapter into acts)
+      // Pass 1: Segmentation
       if (pass === 1) {
-        if (progress.total > 0) {
+        if (scenes.length > 0) {
           const confirmed = await showConfirm(
             "Re-segment Chapter?",
-            `Acts already exist for this chapter. Are you sure you want to delete all ${progress.total} acts and re-segment? Current translations and analysis WILL BE LOST.`,
+            "Scenes already exist. Re-segmenting will delete current scenes and translations. Continue?",
           );
           if (!confirmed) return;
-
-          await deleteAllActs(chapter.id);
         }
-        const result = await runArchitectPhase(chapter.id);
+
+        const result = await runSceneSegmentation(chapter.id, {
+          model: modelName,
+        });
         await loadTranslationChapter();
         await showSuccess(
-          "Architect Completed",
-          `Chapter segmented into ${result.actsCreated} act(s) using ${result.segmentationSource}.`,
+          "Segmentation Complete",
+          `Created ${result.scenesCreated} scenes.`,
         );
         return;
       }
 
-      // Pass 2: Lexicographer (analysis + term extraction)
+      // Check if scenes exist for remaining passes
+      if (scenes.length === 0) {
+        await showError("No Scenes", "Run segmentation (Pass 1) first.");
+        return;
+      }
+
+      // Pass 2: Act Analysis
       if (pass === 2) {
-        if (progress.total === 0) {
-          await showError(
-            "No Acts",
-            "Run Pass 1 first to segment the chapter into acts.",
-          );
-          return;
+        setIsAnalyzingScene(true);
+        setFailedAnalysisScenes(new Set());
+        let completed = 0;
+        let failed = 0;
+        const failedIds = new Set<number>();
+
+        for (const scene of scenes) {
+          try {
+            await analyzeScene(scene.id, { model: modelName });
+            completed++;
+          } catch (err) {
+            console.error(`Failed analyzing scene ${scene.id}:`, err);
+            failedIds.add(scene.id);
+            failed++;
+          }
         }
-        const result = await runChapterAnalysis(chapter.id, {
-          model: modelName,
-          task,
-        });
+
+        setFailedAnalysisScenes(failedIds);
         await loadTranslationChapter();
-
-        if (result.failed && result.failed.length > 0) {
-          await showError(
-            "Analysis Incomplete",
-            `${result.processed} acts analyzed, but ${result.failed.length} act(s) failed (e.g., ${result.failed[0]?.label || "unknown"}). Check LM Studio for token limits or JSON errors.`,
-          );
-        }
-
-        if (result.terms && result.terms.length > 0) {
-          setExtractedTerms(result.terms);
-          setIsGlossaryDialogOpen(true);
-        } else if (result.failed?.length === 0) {
-          await showSuccess(
-            "Lexicographer Completed",
-            `Analyzed all ${result.processed || 0} act(s). No new terms identified.`,
-          );
-        }
-
-        return;
-      }
-
-      // Pass 4: Polish
-      if (pass === 4) {
-        if (progress.total === 0) {
-          await showError(
-            "No Acts",
-            "Run Pass 1 first to segment the chapter into acts.",
-          );
-          return;
-        }
-        if (progress.pass3Done < progress.total) {
+        if (failed > 0) {
           await showInfo(
-            "Translate First",
-            "Ensure all acts are translated (Pass 3) before polishing.",
+            "Analysis Complete (with Errors)",
+            `Analyzed ${completed} scenes. ${failed} scene(s) failed - marked with ⚠️ in the scenes list.`,
           );
-          return;
+        } else {
+          await showSuccess(
+            "Analysis Complete",
+            `Analyzed all ${completed} scenes.`,
+          );
+        }
+        return;
+      }
+
+      // Pass 3: Term & Name Extraction
+      if (pass === 3) {
+        setIsExtractingTerms(true);
+        setFailedExtractionScenes(new Set());
+        let completed = 0;
+        let failed = 0;
+        const allTerms: GlossaryCandidate[] = [];
+        const failedIds = new Set<number>();
+
+        for (const scene of scenes) {
+          try {
+            const result = await extractSceneTerms(scene.id, {
+              model: modelName,
+            });
+            if (result.terms && result.terms.length > 0) {
+              const normalizedTerms = result.terms.map((t: any) => ({
+                ...t,
+                context: t.context || "",
+              }));
+              allTerms.push(
+                ...(normalizedTerms as unknown as GlossaryCandidate[]),
+              );
+            }
+            completed++;
+          } catch (err) {
+            console.error(`Failed extracting from scene ${scene.id}:`, err);
+            failedIds.add(scene.id);
+            failed++;
+          }
         }
 
-        const result = await runChapterPass(chapter.id, 4, {
-          model: modelName,
-        });
+        setFailedExtractionScenes(failedIds);
         await loadTranslationChapter();
 
-        if (result.failed > 0) {
-          await showError(
-            "Polish Completed With Errors",
-            `${result.completed} acts succeeded, ${result.failed} failed.`,
-          );
-          return;
+        if (allTerms.length > 0) {
+          setExtractedTerms(allTerms);
+          setIsGlossaryDialogOpen(true);
+          if (failed > 0) {
+            await showInfo(
+              "Extraction Complete (with Errors)",
+              `Extracted ${allTerms.length} terms from ${completed} scenes. ${failed} scene(s) failed - marked with ⚠️ in the scenes list.`,
+            );
+          } else {
+            await showSuccess(
+              "Extraction Complete",
+              `Extracted ${allTerms.length} terms from all ${completed} scenes.`,
+            );
+          }
+        } else {
+          if (failed > 0) {
+            await showError(
+              "Extraction Failed",
+              `Could not extract terms from any scenes. ${failed} scene(s) failed.`,
+            );
+          } else {
+            await showInfo(
+              "No Terms Found",
+              "AI did not identify new terminology in any scenes.",
+            );
+          }
+        }
+        return;
+      }
+
+      // Pass 4: Translation
+      if (pass === 4) {
+        let completed = 0;
+        let failed = 0;
+
+        for (const scene of scenes) {
+          try {
+            await translateScene(scene.id, { model: modelName });
+            completed++;
+          } catch (err) {
+            console.error(`Failed translating scene ${scene.id}:`, err);
+            failed++;
+          }
         }
 
-        await showSuccess(
-          "Polish Completed",
-          `All ${result.completed} act(s) polished.`,
-        );
+        await loadTranslationChapter();
+        if (failed > 0) {
+          await showError(
+            "Translation Complete with Errors",
+            `${completed} succeeded, ${failed} failed.`,
+          );
+        } else {
+          await showSuccess(
+            "Translation Complete",
+            `All ${completed} scenes translated.`,
+          );
+        }
         return;
       }
 
-      // Pass 3: Translation
-      if (progress.total === 0) {
-        await showError(
-          "No Acts",
-          "Run Pass 1 first to segment the chapter into acts.",
-        );
+      // Pass 5: Polishing
+      if (pass === 5) {
+        let completed = 0;
+        let failed = 0;
+
+        for (const scene of scenes) {
+          try {
+            await polishScene(scene.id, { model: modelName });
+            completed++;
+          } catch (err) {
+            console.error(`Failed polishing scene ${scene.id}:`, err);
+            failed++;
+          }
+        }
+
+        await loadTranslationChapter();
+        if (failed > 0) {
+          await showError(
+            "Polish Complete with Errors",
+            `${completed} succeeded, ${failed} failed.`,
+          );
+        } else {
+          await showSuccess(
+            "Polish Complete",
+            `All ${completed} scenes polished.`,
+          );
+        }
         return;
       }
 
-      const result = await runChapterPass(chapter.id, 3, {
-        model: modelName,
-      });
-      await loadTranslationChapter();
-
-      if (result.failed > 0) {
-        await showError(
-          "Translation Completed With Errors",
-          `${result.completed} acts succeeded, ${result.failed} failed.`,
-        );
-        return;
-      }
-
-      await showSuccess(
-        "Translation Completed",
-        `All ${result.completed} act(s) translated.`,
-      );
     } catch (error) {
       await showError(
         `Pass ${pass} Failed`,
@@ -719,42 +587,37 @@ export function Translation() {
       );
     } finally {
       setIsRunningPass(false);
+      setIsAnalyzingScene(false);
+      setIsExtractingTerms(false);
     }
   }
 
   async function handleSaveTranslation() {
-    if (!selectedAct) {
-      return;
-    }
+    if (!selectedScene) return;
 
     if (!editableTranslation.trim()) {
-      await showInfo(
-        "Nothing to Save",
-        "The translation field is empty. Please add translation text before saving.",
-      );
+      await showInfo("Nothing to Save", "Translation is empty.");
       return;
     }
 
     try {
       setIsSaving(true);
+      const response = await fetch(
+        `${API_BASE_URL}/scenes/${selectedScene.id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ translatedText: editableTranslation }),
+        },
+      );
 
-      // Check if it's a SubAct or Act
-      const isSubAct = "actId" in selectedAct;
-
-      if (isSubAct) {
-        // Save SubAct translation
-        await updateSubActTranslation(selectedAct.id, editableTranslation);
-      } else {
-        // Save Act translation
-        await updateActTranslation(selectedAct.id, editableTranslation);
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `HTTP ${response.status}`);
       }
 
-      // Reload chapter to sync the state
       await loadTranslationChapter();
-      await showSuccess(
-        "Saved",
-        `Translation was saved for ${isSubAct ? "the SubAct" : "the Act"}.`,
-      );
+      await showSuccess("Saved", "Translation updated successfully.");
     } catch (error) {
       await showError(
         "Save Failed",
@@ -779,10 +642,6 @@ export function Translation() {
     }
   }
 
-  function formatCharCount(value?: string | null): string {
-    return `${(value || "").length.toLocaleString()} chars`;
-  }
-
   async function runConnectionTest(silent = false) {
     try {
       setApiStatus("testing");
@@ -790,14 +649,14 @@ export function Translation() {
       const lmStudioStatus = health.services?.lmStudio?.status;
       const lmStudioMessage =
         health.services?.lmStudio?.message ||
-        "LM Studio service is not available.";
+        "Ollama service is not available.";
 
       if (health.status === "ok" && lmStudioStatus === "connected") {
         setApiStatus("ok");
         if (!silent) {
           await showSuccess(
             "Connection Successful",
-            "API and LM Studio are responding correctly.",
+            "API and Ollama are responding correctly.",
           );
         }
       } else {
@@ -807,7 +666,7 @@ export function Translation() {
             "Connection Failed",
             lmStudioStatus === "disconnected"
               ? lmStudioMessage
-              : "API responded but LM Studio is not connected.",
+              : "API responded but Ollama is not connected.",
           );
         }
       }
@@ -828,144 +687,56 @@ export function Translation() {
     await runConnectionTest(false);
   }
 
-  async function handleDeleteAllActs() {
-    if (!chapter) return;
-    if (acts.length === 0) {
-      await showInfo("No Acts", "There are no acts to delete.");
-      return;
-    }
-    const confirmed = await showConfirm(
-      "Delete All Acts?",
-      `Are you sure you want to delete all ${acts.length} act(s) for this chapter? This cannot be undone.`,
-    );
-    if (!confirmed) return;
+  async function handleExtractTerms() {
+    if (!selectedScene) return;
+
     try {
-      const result = await deleteAllActs(chapter.id);
+      setIsExtractingTerms(true);
+      const result = await extractSceneTerms(selectedScene.id, {
+        model: modelName,
+      });
+
+      if (result.terms && result.terms.length > 0) {
+        setExtractedTerms(result.terms as unknown as GlossaryCandidate[]);
+        setIsGlossaryDialogOpen(true);
+      } else {
+        await showInfo(
+          "No Terms Found",
+          "AI did not identify any new key terminology in this scene.",
+        );
+      }
+    } catch (error) {
+      await showError(
+        "Extraction Failed",
+        error instanceof Error ? error.message : "Unable to extract terms.",
+      );
+    } finally {
+      setIsExtractingTerms(false);
+    }
+  }
+
+  async function handleAnalyzeScene() {
+    if (!selectedScene) return;
+
+    try {
+      setIsAnalyzingScene(true);
+      await analyzeScene(selectedScene.id, { model: modelName });
       await loadTranslationChapter();
       await showSuccess(
-        "Acts Deleted",
-        `Deleted ${result.deletedCount} act(s). The chapter has been reset.`,
+        "Analysis Complete",
+        "Scene tone and narrative context updated.",
       );
     } catch (error) {
       await showError(
-        "Delete Failed",
-        error instanceof Error ? error.message : "Unable to delete acts.",
-      );
-    }
-  }
-
-  async function handleExport() {
-    if (!chapter) return;
-    try {
-      setIsSaving(true);
-      const result = await exportChapterResult(chapter.id);
-      setChapter((prev) =>
-        prev ? { ...prev, finalText: result.finalText } : null,
-      );
-      await showSuccess(
-        "Export Successful",
-        "Chapter final text has been generated from acts, with reasoning blocks removed.",
-      );
-    } catch (error) {
-      await showError(
-        "Export Failed",
-        error instanceof Error
-          ? error.message
-          : "Unable to export chapter result.",
+        "Analysis Failed",
+        error instanceof Error ? error.message : "Unable to analyze scene.",
       );
     } finally {
-      setIsSaving(false);
+      setIsAnalyzingScene(false);
     }
   }
 
-  async function handleGenerateActPolishes() {
-    if (!selectedAct) {
-      await showInfo(
-        "No Act Selected",
-        "Select an act before generating polish.",
-      );
-      return;
-    }
 
-    try {
-      setIsGeneratingPolish(true);
-      const response = await fetch(
-        `${API_BASE_URL}/translation/polish-batch/act/${selectedAct.id}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            count: 3,
-            temperature: 0.7,
-            model: modelName,
-          }),
-        },
-      );
-
-      if (!response.ok) {
-        throw new Error(`Failed to generate polish: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-
-      // Map response to local state
-      const polishes =
-        data.data?.map((p: any) => ({
-          id: p.id,
-          reason: p.reason || "Polish variation",
-          isSelected: p.isSelected || false,
-        })) || [];
-
-      setActPolishes(polishes);
-      await showSuccess(
-        "Polish Generated",
-        `Generated ${polishes.length} polish variations for Act ${selectedAct.label}`,
-      );
-    } catch (error) {
-      await showError(
-        "Polish Generation Failed",
-        error instanceof Error ? error.message : "Unable to generate polish.",
-      );
-    } finally {
-      setIsGeneratingPolish(false);
-    }
-  }
-
-  async function handleSelectActPolish(polishId: number) {
-    if (!selectedAct) return;
-
-    try {
-      const response = await fetch(
-        `${API_BASE_URL}/translation/polish/${polishId}/select`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-        },
-      );
-
-      if (!response.ok) {
-        throw new Error(`Failed to select polish: ${response.statusText}`);
-      }
-
-      // Update local state
-      setActPolishes((prev) =>
-        prev.map((p) => ({
-          ...p,
-          isSelected: p.id === polishId,
-        })),
-      );
-
-      await showSuccess(
-        "Polish Selected",
-        "Polish variation has been applied.",
-      );
-    } catch (error) {
-      await showError(
-        "Selection Failed",
-        error instanceof Error ? error.message : "Unable to select polish.",
-      );
-    }
-  }
 
   if (isLoadingChapter) {
     return (
@@ -998,7 +769,7 @@ export function Translation() {
             to={`/series/${seriesId}`}
             className="hover:text-[#4A3D39] transition-colors"
           >
-            &larr; {chapter.Series.title}
+            &larr; {(chapter as any).Series?.title || "Series"}
           </Link>
           <span className="mx-3 text-[#d8cdbd]">&rsaquo;</span>
           <span className="text-[#4A3D39]">CHAPTER {chapter.number}</span>
@@ -1010,64 +781,78 @@ export function Translation() {
               {chapter.title || `Chapter ${chapter.number}`}
             </div>
             <div className="text-[9px] tracking-[0.1em] font-sans text-[#a0908b] uppercase">
-              P1 {progress.total > 0 ? "DONE" : "PENDING"} / P2{" "}
-              {progress.pass2Done} / P3 {progress.pass3Done} / P4{" "}
-              {progress.pass4Done} &bull; {progress.total} ACTS
+              STATUS: {progress.segmented ? "SEGMENTED" : "PENDING"} &bull;{" "}
+              {progress.translated}/{progress.total} TRANSLATED &bull;{" "}
+              {progress.polished}/{progress.total} POLISHED
             </div>
           </div>
           <div className="flex gap-2">
-            <Button
-              variant="outline"
-              onClick={() => void handleRunChapterPass(1)}
-              disabled={isRunningPass || !isLmStudioOnline}
-              className={`${progress.total === 0 ? "bg-[#d0a080] hover:bg-[#bd8c6c] border-none text-white font-bold" : "bg-transparent text-[#d0a080] border-[#d0a080] hover:bg-[#fcf8f4]"} h-8 text-[9px] tracking-widest rounded-sm px-4 font-sans uppercase shadow-sm border`}
-            >
-              {isRunningPass
-                ? "SEGMENTING..."
-                : progress.total === 0
-                  ? "SEGMENT CHAPTER"
-                  : "RE-SEGMENT CHAPTER"}
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => void handleRunChapterPass(2, "terms")}
-              disabled={
-                isRunningPass || !isLmStudioOnline || progress.total === 0
-              }
-              className="bg-transparent text-[#2f7a46] border-[#2f7a46] hover:bg-[#ebf5ed] h-8 text-[9px] tracking-widest rounded-sm px-4 font-sans uppercase shadow-sm border"
-            >
-              EXTRACT TERMS
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => void handleRunChapterPass(2, "narrative")}
-              disabled={
-                isRunningPass || !isLmStudioOnline || progress.total === 0
-              }
-              className="bg-transparent text-[#8B2626] border-[#8B2626] hover:bg-[#fcf0f0] h-8 text-[9px] tracking-widest rounded-sm px-4 font-sans uppercase shadow-sm border"
-            >
-              FULL ANALYSIS
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => void handleRunChapterPass(3)}
-              disabled={
-                isRunningPass || !isLmStudioOnline || progress.total === 0
-              }
-              className="bg-transparent text-[#5B3E96] border-[#5B3E96] hover:bg-[#f3f0fc] h-8 text-[9px] tracking-widest rounded-sm px-4 font-sans uppercase shadow-sm border"
-            >
-              TRANSLATE ALL
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => void handleRunChapterPass(4)}
-              disabled={
-                isRunningPass || !isLmStudioOnline || progress.total === 0
-              }
-              className="bg-transparent text-[#d48c29] border-[#d48c29] hover:bg-[#fcf5eb] h-8 text-[9px] tracking-widest rounded-sm px-4 font-sans uppercase shadow-sm border"
-            >
-              POLISH ALL
-            </Button>
+            <div className="flex bg-[#f2eadc]/40 p-1 rounded-sm border border-[#d8cdbd]/50 mr-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void handleRunChapterPass(1)}
+                disabled={isRunningPass || !isLmStudioOnline}
+                className="h-7 text-[9px] tracking-widest px-3 hover:bg-white/60 font-sans uppercase text-[#807068]"
+              >
+                1. SEGMENT
+              </Button>
+              <div className="w-[1px] h-4 bg-[#d8cdbd] self-center mx-1" />
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void handleRunChapterPass(2)}
+                disabled={
+                  isRunningPass ||
+                  !isLmStudioOnline ||
+                  progress.total === 0
+                }
+                className="h-7 text-[9px] tracking-widest px-3 hover:bg-white/60 font-sans uppercase text-[#807068]"
+              >
+                {isRunningPass && isAnalyzingScene ? "ANALYZING..." : "2. ANALYZE ALL"}
+              </Button>
+              <div className="w-[1px] h-4 bg-[#d8cdbd] self-center mx-1" />
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void handleRunChapterPass(3)}
+                disabled={
+                  isRunningPass ||
+                  !isLmStudioOnline ||
+                  progress.total === 0
+                }
+                className="h-7 text-[9px] tracking-widest px-3 hover:bg-white/60 font-sans uppercase text-[#807068]"
+              >
+                {isRunningPass && isExtractingTerms ? "EXTRACTING..." : "3. EXTRACT ALL"}
+              </Button>
+              <div className="w-[1px] h-4 bg-[#d8cdbd] self-center mx-1" />
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void handleRunChapterPass(4)}
+                disabled={
+                  isRunningPass || !isLmStudioOnline || progress.total === 0
+                }
+                className="h-7 text-[9px] tracking-widest px-3 hover:bg-white/60 font-sans uppercase text-[#807068]"
+              >
+                4. TRANSLATE ALL
+              </Button>
+              <div className="w-[1px] h-4 bg-[#d8cdbd] self-center mx-1" />
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void handleRunChapterPass(5)}
+                disabled={
+                  isRunningPass ||
+                  !isLmStudioOnline ||
+                  progress.translated < progress.total ||
+                  progress.total === 0
+                }
+                className="h-7 text-[9px] tracking-widest px-3 hover:bg-white/60 font-sans uppercase text-[#8B2626]"
+              >
+                5. POLISH ALL
+              </Button>
+            </div>
 
             <div className="w-[1px] h-8 bg-[#d8cdbd] mx-1" />
 
@@ -1084,282 +869,501 @@ export function Translation() {
             >
               GLOSSARY
             </Link>
-            <Button
-              variant="outline"
-              disabled={isSaving || progress.pass3Done === 0}
-              onClick={() => void handleExport()}
-              className="border-[#d8cdbd] text-[#2f7a46] h-8 text-[9px] tracking-widest rounded-sm px-4 hover:bg-[#ebf5ed] hover:text-[#1a4d2e] bg-transparent font-sans uppercase"
-            >
-              {isSaving ? "EXPORTING..." : "EXPORT"}
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => void handleDeleteAllActs()}
-              className="border-[#d8cdbd] text-[#c68080] h-8 text-[9px] tracking-widest rounded-sm px-4 hover:bg-[#ffeaea] hover:text-[#a04040] bg-transparent font-sans uppercase"
-            >
-              RESET CHAPTER
-            </Button>
           </div>
         </div>
       </div>
 
       <div className="flex-1 flex gap-6 min-h-0 mb-6 overflow-hidden">
-        {/* SIDEBAR: Unified Act Selector */}
-        <div className="w-64 flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm opacity-90 min-h-0 shrink-0">
-          <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
-            <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
-              ACT LIST
-            </span>
-          </div>
-          <div className="flex-1 overflow-y-auto p-1 py-2">
-            {acts.map((act) => {
-              // Generate list of SubActs or fallback to Act itself
-              const actItems =
-                act.SubActs && act.SubActs.length > 0
-                  ? act.SubActs.map((subAct) => ({
-                      id: subAct.id,
-                      type: "subact",
-                      label: `SubAct ${subAct.sequence}`,
-                      charCount: subAct.charCount,
-                      tokenCount: subAct.tokenCount,
-                      translated: !!subAct.translatedText,
-                      actSequence: act.sequence,
-                    }))
-                  : [
-                      {
-                        id: act.id,
-                        type: "act",
-                        label: `Act ${act.sequence} (Full)`,
-                        charCount: (act.rawText || "").length,
-                        tokenCount: act.tokenCount,
-                        translated: !!act.translatedText,
-                        actSequence: act.sequence,
-                      },
-                    ];
-
-              return (
-                <div key={`act-${act.id}`}>
-                  {/* Act Header with Status Indicators */}
-                  <div className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[#666] bg-[#f5ede4] border-b border-[#e0d5c7] flex justify-between items-center">
-                    <span>Act {act.sequence}</span>
-                    <div className="flex gap-1.5">
-                      {/* Extraction Status Indicator */}
-                      <div
-                        className={`w-2 h-2 rounded-full ${
-                          act.anatomyProfile?.termExtractionStatus
-                            ? "bg-blue-400"
-                            : "bg-gray-300"
-                        }`}
-                        title={`Extraction: ${act.anatomyProfile?.termExtractionStatus || "pending"}`}
-                      />
-                      {/* Analysis Status Indicator */}
-                      <div
-                        className={`w-2 h-2 rounded-full ${
-                          act.anatomyProfile?.actAnalysisStatus
-                            ? "bg-green-400"
-                            : "bg-gray-300"
-                        }`}
-                        title={`Analysis: ${act.anatomyProfile?.actAnalysisStatus || "pending"}`}
-                      />
-                    </div>
-                  </div>
-
-                  {/* Act Items */}
-                  {actItems.map((item) => (
-                    <div
-                      key={item.id}
-                      className={`group flex flex-col px-4 py-3 mx-1 mb-1 rounded-sm cursor-pointer transition-all ${
-                        selectedActId === item.id
-                          ? "bg-[#f2eadc] text-[#4A3D39] border border-[#d8cdbd] shadow-sm"
-                          : "text-[#807068] hover:bg-[#f5efe6] border border-transparent"
-                      }`}
-                      onClick={() => setSelectedActId(item.id)}
-                    >
-                      <div className="flex justify-between items-center mb-1">
-                        <span
-                          className={`text-[10px] font-sans uppercase tracking-widest ${
-                            selectedActId === item.id
-                              ? "font-bold text-[#8B2626]"
-                              : ""
-                          }`}
-                        >
-                          {item.label}
-                        </span>
-                        {item.translated && (
-                          <div
-                            className="w-1.5 h-1.5 rounded-full bg-purple-500"
-                            title="Translated"
-                          />
-                        )}
-                      </div>
-                      <div className="mt-2 text-[8px] font-sans text-[#a0908b] group-hover:text-[#4A3D39] transition-colors">
-                        {item.charCount} chars • {item.tokenCount || 0} tokens
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
         {/* MAIN WORKSPACE */}
         <div className="flex-1 flex gap-4 min-h-0 overflow-hidden">
           {/* Column 1: Source & Analysis */}
           <div className="flex-[0.4] flex flex-col gap-4 min-h-0">
             {/* Source Card */}
-            <div className="flex-[0.5] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0">
+            <div className="flex-[0.6] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0">
               <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
                 <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
-                  Act Source
+                  Scene Source
                 </span>
-                <div className="flex items-center gap-3">
-                  <span className="text-[9px] tracking-widest font-sans text-[#a0908b]">
-                    {formatCharCount(selectedAct?.rawText)}
-                  </span>
-                  {selectedAct && (
-                    <div className="flex gap-1">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={handleEditActStart}
-                        disabled={isActMetadataLoading}
-                        className="h-5 text-[8px] text-blue-600 p-0 font-sans uppercase font-bold hover:text-blue-800"
-                      >
-                        EDIT
-                      </Button>
-                      <div className="w-[1px] h-3 bg-[#d8cdbd] self-center" />
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => void handleDeleteAct()}
-                        disabled={isActMetadataLoading}
-                        className="h-5 text-[8px] text-red-600 p-0 font-sans uppercase font-bold hover:text-red-800"
-                      >
-                        DELETE
-                      </Button>
-                    </div>
-                  )}
-                </div>
+                {selectedScene && (
+                  <div className="flex gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleEditSceneStart}
+                      className="h-5 text-[8px] text-blue-600 p-0 font-sans uppercase font-bold"
+                    >
+                      EDIT
+                    </Button>
+                    <div className="w-[1px] h-3 bg-[#d8cdbd] self-center mx-1" />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => void handleDeleteScene()}
+                      className="h-5 text-[8px] text-red-600 p-0 font-sans uppercase font-bold"
+                    >
+                      DELETE
+                    </Button>
+                  </div>
+                )}
               </div>
               <div className="flex-1 p-5 overflow-y-auto whitespace-pre-wrap text-[13px] leading-relaxed font-serif text-[#4A3D39] bg-white/40">
-                {selectedAct?.rawText || "Select an act to begin."}
+                {selectedScene?.rawText || "Select a scene to begin."}
               </div>
             </div>
 
             {/* Analysis Card */}
-            <div className="flex-[0.5] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0 relative">
-              <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center sticky top-0 z-10">
+            <div className="flex-[0.4] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0 relative">
+              <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30">
                 <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
-                  Analysis Run
+                  Scene Context
                 </span>
-                <div className="flex gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => void handleAnalyzeAct("terms")}
-                    disabled={isRunningPass || !selectedAct}
-                    className="h-5 text-[8px] text-[#2f7a46] p-0 font-sans uppercase font-bold"
-                  >
-                    {isRunningPass ? "..." : "EXTRACT ACT TERMS"}
-                  </Button>
-                  <div className="w-[1px] h-3 bg-[#d8cdbd] self-center" />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => void handleAnalyzeAct("narrative")}
-                    disabled={isRunningPass || !selectedAct}
-                    className="h-5 text-[8px] text-[#8B2626] p-0 font-sans uppercase"
-                  >
-                    {isRunningPass ? "..." : "NAV ANALYSIS"}
-                  </Button>
-                </div>
               </div>
-              <div className="flex-1 p-5 overflow-y-auto bg-white/20">
-                <ActAnalysisCard
-                  linguistic={selectedAct?.Analysis?.anatomyProfile?.linguistic}
-                  narrative={selectedAct?.Analysis?.anatomyProfile?.narrative}
-                />
+              <div className="flex-1 p-5 overflow-y-auto bg-white/20 custom-scrollbar">
+                {selectedScene ? (
+                  <div className="space-y-5">
+                    {/* Summary Section */}
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        {selectedScene.analysis?.analyzedAt && (
+                          <Badge
+                            variant="ghost"
+                            className="h-4 text-[7px] text-[#A0908B] p-0 font-normal italic ml-auto"
+                          >
+                            Updated{" "}
+                            {new Date(
+                              selectedScene.analysis.analyzedAt,
+                            ).toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-[#4A3D39] font-serif italic bg-[#f2eadc]/20 p-3 rounded-sm border-l-2 border-[#8B2626]/30">
+                        {selectedScene.analysis?.summary ||
+                          "No summary available."}
+                      </p>
+                    </div>
+
+                    {/* Emotional Journey Section */}
+                    {selectedScene.analysis?.emotionalExpression && (
+                      <div>
+                        <h4 className="text-[9px] font-bold uppercase text-[#8B2626] mb-2 tracking-widest border-b border-[#d8cdbd]/30 pb-1">
+                          Emotional Journey
+                        </h4>
+                        <div className="bg-white/40 p-3 rounded-sm border border-[#d8cdbd]/20 space-y-2">
+                          <div>
+                            <p className="text-[9px] text-[#4A3D39] font-serif italic">
+                              {
+                                selectedScene.analysis.emotionalExpression
+                                  .primary
+                              }
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[8px] text-[#A0908B] font-sans font-bold uppercase">
+                              Intensity
+                            </span>
+                            <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-[#8B2626]"
+                                style={{
+                                  width: `${
+                                    (selectedScene.analysis.emotionalExpression
+                                      ?.intensity || 0.5) * 100
+                                  }%`,
+                                }}
+                              />
+                            </div>
+                            <span className="text-[9px] text-[#4A3D39] font-mono font-bold">
+                              {selectedScene.analysis.emotionalExpression.intensity?.toFixed(
+                                1,
+                              )}
+                            </span>
+                          </div>
+                          {selectedScene.analysis.emotionalExpression
+                            .directness && (
+                            <div className="text-[8px] text-[#807068] uppercase tracking-wider">
+                              Directness:{" "}
+                              <span className="font-bold">
+                                {selectedScene.analysis.emotionalExpression.directness.toUpperCase()}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Cultural & Social Context */}
+                    <div>
+                      <h4 className="text-[9px] font-bold uppercase text-[#8B2626] mb-2 tracking-widest border-b border-[#d8cdbd]/30 pb-1">
+                        Cultural Context
+                      </h4>
+                      <div className="flex flex-wrap gap-1.5">
+                        {selectedScene.analysis?.kuaiMan?.dominantPattern && (
+                          <Badge className="bg-amber-50 text-amber-800 border-amber-200 text-[8px] h-5 font-medium px-2">
+                            KUAI-MAN:{" "}
+                            {selectedScene.analysis.kuaiMan.dominantPattern.toUpperCase()}
+                          </Badge>
+                        )}
+                        {selectedScene.analysis?.faceSystem
+                          ?.faceThreatPresent && (
+                          <Badge className="bg-rose-50 text-rose-700 border-rose-200 text-[8px] h-5 font-medium px-2">
+                            FACE THREAT
+                          </Badge>
+                        )}
+                        {selectedScene.analysis?.powerDynamic?.type && (
+                          <Badge className="bg-slate-50 text-slate-700 border-slate-200 text-[8px] h-5 font-medium px-2 uppercase">
+                            {selectedScene.analysis.powerDynamic.type.replace(
+                              "_",
+                              " ",
+                            )}
+                          </Badge>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Linguistic Profile Section */}
+                    {selectedScene.analysis?.linguistic && (
+                      <div>
+                        <h4 className="text-[9px] font-bold uppercase text-[#8B2626] mb-2 tracking-widest border-b border-[#d8cdbd]/30 pb-1">
+                          Linguistic Weave
+                        </h4>
+                        <div className="space-y-2">
+                          {/* Structure & Pattern */}
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="bg-[#fcfaf8] p-2 rounded-sm border border-[#d8cdbd]/40">
+                              <h5 className="text-[7px] font-bold uppercase text-[#A0908B] mb-1 tracking-tighter">
+                                Structure
+                              </h5>
+                              <p className="text-[8.5px] text-[#4A3D39] font-sans font-bold">
+                                {selectedScene.analysis.linguistic
+                                  .sentenceStructure || "Standard"}
+                              </p>
+                            </div>
+                            {selectedScene.analysis.linguistic.topicProminence
+                              ?.frequency && (
+                              <div className="bg-[#fcfaf8] p-2 rounded-sm border border-[#d8cdbd]/40">
+                                <h5 className="text-[7px] font-bold uppercase text-[#A0908B] mb-1 tracking-tighter">
+                                  Topic Density
+                                </h5>
+                                <div className="flex items-center gap-1">
+                                  <span className="text-[8.5px] text-[#4A3D39] font-mono font-bold">
+                                    {Math.round(
+                                      selectedScene.analysis.linguistic
+                                        .topicProminence.frequency * 100,
+                                    )}
+                                    %
+                                  </span>
+                                  <div className="flex-1 h-1 bg-gray-100 rounded-full overflow-hidden">
+                                    <div
+                                      className="h-full bg-slate-400"
+                                      style={{
+                                        width: `${selectedScene.analysis.linguistic.topicProminence.frequency * 100}%`,
+                                      }}
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Stylistic Markers */}
+                          {(selectedScene.analysis.linguistic.onomatopoeia
+                            ?.density ||
+                            selectedScene.analysis.linguistic.honorifics
+                              ?.density) && (
+                            <div className="bg-[#fcfaf8]/50 p-2 rounded-sm border border-[#d8cdbd]/30">
+                              <h5 className="text-[7px] font-bold uppercase text-[#A0908B] mb-1.5 tracking-widest">
+                                Stylistic Markers
+                              </h5>
+                              <div className="flex flex-wrap gap-1">
+                                {selectedScene.analysis.linguistic.onomatopoeia
+                                  ?.density && (
+                                  <Badge
+                                    variant="secondary"
+                                    className="text-[7px] h-4 px-1.5 bg-white border-[#D8CDBD] text-[#807068]"
+                                  >
+                                    ONOMATOPOEIA:{" "}
+                                    {selectedScene.analysis.linguistic.onomatopoeia.density.toUpperCase()}
+                                  </Badge>
+                                )}
+                                {selectedScene.analysis.linguistic.honorifics
+                                  ?.density && (
+                                  <Badge
+                                    variant="secondary"
+                                    className="text-[7px] h-4 px-1.5 bg-white border-[#D8CDBD] text-[#807068]"
+                                  >
+                                    KEIGO:{" "}
+                                    {selectedScene.analysis.linguistic.honorifics.density.toUpperCase()}
+                                  </Badge>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Four-Character Idioms with Meanings */}
+                          {(selectedScene.analysis.linguistic
+                            .fourCharacterIdioms?.length ?? 0) > 0 && (
+                            <div className="bg-[#fcfaf8]/50 p-2 rounded-sm border border-[#d8cdbd]/30">
+                              <h5 className="text-[7px] font-bold uppercase text-[#8B2626] mb-1.5 tracking-widest">
+                                Classical Expressions
+                              </h5>
+                              <div className="space-y-1">
+                                {selectedScene.analysis.linguistic.fourCharacterIdioms!.map(
+                                  (item: any, idx: number) => (
+                                    <div
+                                      key={idx}
+                                      className="text-[8px] bg-white/40 p-1.5 rounded border border-[#d8cdbd]/20"
+                                    >
+                                      <p className="font-mono text-[#4A3D39] font-bold">
+                                        {item.idiom}
+                                      </p>
+                                      <p className="text-[7.5px] text-[#807068] italic mt-0.5">
+                                        {item.meaning}
+                                      </p>
+                                    </div>
+                                  ),
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Topic/Focus Examples */}
+                          {selectedScene.analysis.linguistic.topicProminence
+                            ?.examples &&
+                            selectedScene.analysis.linguistic.topicProminence
+                              .examples.length > 0 && (
+                              <div className="bg-[#fcfaf8]/50 p-2 rounded-sm border border-[#d8cdbd]/30">
+                                <h5 className="text-[7px] font-bold uppercase text-[#8B2626] mb-1.5 tracking-widest">
+                                  Key Passages
+                                </h5>
+                                <div className="space-y-1">
+                                  {selectedScene.analysis.linguistic.topicProminence.examples.map(
+                                    (example: string, idx: number) => (
+                                      <p
+                                        key={idx}
+                                        className="text-[8px] font-serif text-[#4A3D39] italic bg-white/40 p-1.5 rounded border border-[#d8cdbd]/20 line-clamp-2"
+                                      >
+                                        {example}
+                                      </p>
+                                    ),
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="pt-4 border-t border-[#d8cdbd]/30 mt-4 flex flex-col gap-2">
+                      <div className="flex gap-2">
+                        <Button
+                          variant="outline"
+                          onClick={() => void handleExtractTerms()}
+                          disabled={
+                            isExtractingTerms ||
+                            isAnalyzingScene ||
+                            !selectedScene ||
+                            !isLmStudioOnline
+                          }
+                          className="flex-1 h-8 text-[9px] tracking-widest border-[#d8cdbd] text-[#807068] hover:bg-[#f2eadc] font-sans uppercase rounded-sm"
+                        >
+                          {isExtractingTerms
+                            ? "EXTRACTING..."
+                            : "EXTRACT TERMS"}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={() => void handleAnalyzeScene()}
+                          disabled={
+                            isExtractingTerms ||
+                            isAnalyzingScene ||
+                            !selectedScene ||
+                            !isLmStudioOnline
+                          }
+                          className="flex-1 h-8 text-[9px] tracking-widest border-[#d8cdbd] text-[#807068] hover:bg-[#f2eadc] font-sans uppercase rounded-sm"
+                        >
+                          {isAnalyzingScene ? "ANALYZING..." : "ANALYZE TONE"}
+                        </Button>
+                      </div>
+                      <p className="text-[8px] text-[#a0908b] mt-1 italic text-center px-1 leading-relaxed">
+                        Refine the scene's emotional context and identify key
+                        terminology to guide the AI translator.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="h-full flex items-center justify-center text-[#a0908b] italic text-[11px]">
+                    Select a scene for context
+                  </div>
+                )}
               </div>
             </div>
           </div>
 
-          {/* Column 2: Translation & Polish */}
+          {/* Column 2: Translation & Editor */}
           <div className="flex-[0.6] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0">
             <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
               <div className="flex items-center gap-3">
                 <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
                   Translation Editor
                 </span>
-                <Badge
-                  variant="outline"
-                  className="h-4 text-[8px] bg-white/50 border-[#D8CDBD] text-[#8B2626]"
-                >
-                  PASS 3
-                </Badge>
+                {selectedScene?.status === "translated" && (
+                  <Badge
+                    variant="outline"
+                    className="h-4 text-[8px] bg-white/50 border-[#D8CDBD] text-[#8B2626]"
+                  >
+                    TRANSLATED
+                  </Badge>
+                )}
+                {selectedScene?.status === "polished" && (
+                  <Badge
+                    variant="outline"
+                    className="h-4 text-[8px] bg-[#ebf5ed] border-[#2f7a46] text-[#2f7a46]"
+                  >
+                    POLISHED
+                  </Badge>
+                )}
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-[9px] tracking-widest font-sans text-[#a0908b] mr-2">
-                  {formatCharCount(editableTranslation)}
-                </span>
                 <Button
                   variant="outline"
-                  onClick={() => void handleTranslateAct(3)}
-                  disabled={isRunningPass || !selectedAct || !isLmStudioOnline}
+                  onClick={() => void handleTranslateScene()}
+                  disabled={
+                    isRunningPass || !selectedScene || !isLmStudioOnline
+                  }
                   className="h-6 text-[8px] tracking-[0.1em] bg-[#8B2626] hover:bg-[#701c1c] border-none text-white font-sans uppercase rounded-sm px-3"
                 >
                   Translate
                 </Button>
                 <Button
                   variant="outline"
-                  onClick={() => void handleShowPrompt()}
-                  disabled={isFetchingPrompt || !selectedAct}
-                  className="h-6 text-[8px] tracking-[0.1em] bg-[#f2eadc]/40 border border-[#d8cdbd] hover:bg-[#f2eadc] text-[#807068] font-sans uppercase rounded-sm px-3"
+                  onClick={() => void handlePolishScene()}
+                  disabled={
+                    isRunningPass ||
+                    !selectedScene ||
+                    !selectedScene.translatedText ||
+                    !isLmStudioOnline
+                  }
+                  className="h-6 text-[8px] tracking-[0.1em] bg-[#2f7a46] hover:bg-[#1a4d2e] border-none text-white font-sans uppercase rounded-sm px-3"
                 >
-                  Prompt
+                  Polish
                 </Button>
               </div>
             </div>
 
             <textarea
               value={editableTranslation}
-              onChange={(event) => setEditableTranslation(event.target.value)}
-              className="flex-1 p-6 pb-2 resize-none outline-none bg-white font-serif text-[#4A3D39] text-base leading-relaxed selection:bg-rose-100 placeholder:italic placeholder:text-[#A0908B]/50"
+              onChange={(e) => setEditableTranslation(e.target.value)}
+              className="flex-1 p-6 resize-none outline-none bg-white font-serif text-[#4A3D39] text-base leading-relaxed selection:bg-rose-100 placeholder:italic placeholder:text-[#A0908B]/50"
+              placeholder="Translation output..."
             />
 
-            <div className="flex justify-end p-2 gap-2 border-t border-[#d8cdbd]/50 bg-white/50 shrink-0">
-              <Button
-                variant="ghost"
-                onClick={() => void handleCopyTranslation()}
-                className="h-7 text-[9px] tracking-[0.1em] text-[#a0908b] hover:text-[#4A3D39] font-sans uppercase"
-              >
-                Copy Text
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => void handleSaveTranslation()}
-                disabled={isSaving || !selectedAct}
-                className="h-7 text-[9px] tracking-[0.1em] border-[#d8cdbd] text-[#807068] hover:bg-[#f2eadc] font-sans uppercase px-6"
-              >
-                {isSaving ? "Saving..." : "Save Selection"}
-              </Button>
+            <div className="flex justify-between items-center p-3 border-t border-[#d8cdbd]/50 bg-white/50 shrink-0 px-6">
+              <div className="text-[9px] font-sans text-[#a0908b] tracking-widest uppercase">
+                Scene {selectedScene?.sequence || "-"} &bull; Status:{" "}
+                {selectedScene?.status || "Pending"}
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="ghost"
+                  onClick={() => void handleCopyTranslation()}
+                  className="h-7 text-[9px] tracking-[0.1em] text-[#a0908b] hover:text-[#4A3D39] font-sans uppercase"
+                >
+                  Copy
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => void handleSaveTranslation()}
+                  disabled={isSaving || !selectedScene}
+                  className="h-7 text-[9px] tracking-[0.1em] border-[#d8cdbd] text-[#807068] hover:bg-[#f2eadc] font-sans uppercase px-6"
+                >
+                  {isSaving ? "Saving..." : "Save Edit"}
+                </Button>
+              </div>
             </div>
 
-            {/* Sub-panel: Polish Selector */}
-            <div className="flex-0 max-h-[180px] flex flex-col border-t border-[#d8cdbd] bg-[#f9f7f4] min-h-0 p-4 overflow-y-auto">
-              {selectedAct ? (
-                <PolishSelector
-                  actPolishes={actPolishes}
-                  onGeneratePolishes={handleGenerateActPolishes}
-                  onSelectActPolish={handleSelectActPolish}
-                  isGenerating={isGeneratingPolish}
+            {selectedScene?.status === "polished" &&
+              selectedScene.finalText &&
+              polishPanelVisible && (
+                <PolishSelectionPanel
+                  edits={selectedScene.polishEdits || []}
+                  translatedText={selectedScene.translatedText || ""}
+                  finalText={selectedScene.finalText}
+                  onApplyEdits={(appliedEdits) => void handleApplyPolishEdits(appliedEdits)}
+                  onClose={() => setPolishPanelVisible(false)}
                 />
-              ) : (
-                <div className="flex items-center justify-center h-full text-[#a0908b] italic text-[11px] text-center">
-                  Select an act to manage polish variations
-                </div>
               )}
-            </div>
+          </div>
+        </div>
+
+        {/* Column 3: Scenes Sidebar */}
+        <div className="w-[180px] flex flex-col border border-[#d8cdbd] bg-[#FBF9F6] rounded-sm shadow-sm min-h-0 overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-[#d8cdbd] shrink-0 bg-[#f2eadc]/30 flex justify-between items-center">
+            <span className="text-[10px] tracking-[0.2em] font-sans text-[#a0908b] uppercase font-bold">
+              Scenes
+            </span>
+            {scenes.length > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void handleDeleteAllScenes()}
+                className="h-5 text-[8px] text-red-600 p-0 font-sans uppercase font-bold hover:bg-transparent"
+              >
+                DELETE ALL
+              </Button>
+            )}
+          </div>
+          <div className="flex-1 overflow-y-auto p-2 space-y-1 bg-white/20">
+            {scenes.length === 0 ? (
+              <div className="text-[10px] text-[#a0908b] italic p-4 text-center">
+                No scenes yet. Run segmentation.
+              </div>
+            ) : (
+              scenes.map((s) => (
+                <button
+                  key={s.id}
+                  onClick={() => setSelectedSceneId(s.id)}
+                  className={`w-full text-left p-3 rounded-sm transition-all border ${
+                    selectedSceneId === s.id
+                      ? "bg-[#f2eadc] border-[#d8cdbd] shadow-sm"
+                      : "bg-transparent border-transparent hover:bg-[#f2eadc]/40 text-[#807068]"
+                  }`}
+                >
+                  <div className="flex justify-between items-start mb-1">
+                    <span
+                      className={`text-[10px] font-bold font-sans ${selectedSceneId === s.id ? "text-[#8B2626]" : "text-[#a0908b]"}`}
+                    >
+                      SCENE {s.sequence}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      {failedExtractionScenes.has(s.id) && (
+                        <div
+                          title="Failed term extraction"
+                          className="text-[12px]"
+                        >
+                          ⚠️
+                        </div>
+                      )}
+                      {failedAnalysisScenes.has(s.id) && (
+                        <div title="Failed analysis" className="text-[12px]">
+                          ⚠️
+                        </div>
+                      )}
+                      {s.status === "polished" ? (
+                        <div className="w-1.5 h-1.5 bg-[#2f7a46] rounded-full" />
+                      ) : s.status === "translated" ? (
+                        <div className="w-1.5 h-1.5 bg-[#8B2626] rounded-full" />
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="text-[9px] line-clamp-2 leading-relaxed text-[#4A3D39]/70 font-serif">
+                    {s.rawText.substring(0, 60)}...
+                  </div>
+                </button>
+              ))
+            )}
           </div>
         </div>
       </div>
@@ -1432,51 +1436,49 @@ export function Translation() {
         isOpen={isGlossaryDialogOpen}
         onOpenChange={setIsGlossaryDialogOpen}
         terms={extractedTerms}
-        onApproved={() => void loadTranslationChapter()}
+        language={chapter?.Series?.language}
+        onApproved={() => {
+          showSuccess(
+            "Glossary Updated",
+            "Terms have been added to the library.",
+          );
+        }}
       />
 
-      <PromptViewerDialog
-        isOpen={isPreviewPromptOpen}
-        onOpenChange={setIsPreviewPromptOpen}
-        prompt={currentPrompt}
-        actLabel={selectedAct?.label}
-      />
-
-      <Dialog open={isEditingAct} onOpenChange={setIsEditingAct}>
-        <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle>Edit Act {selectedAct?.label}</DialogTitle>
-            <DialogDescription>
-              Modify the raw text for this act. Word count limit is ~2500 words.
-              If exceeded, the act will be automatically split at paragraph
-              boundaries.
+      <Dialog open={isEditingScene} onOpenChange={setIsEditingScene}>
+        <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col bg-[#FBF9F6] border-[#d8cdbd] rounded-sm p-0 overflow-hidden shadow-2xl">
+          <DialogHeader className="p-6 border-b border-[#d8cdbd] bg-[#f2eadc]/30">
+            <DialogTitle className="text-[14px] font-bold font-sans uppercase tracking-widest text-[#4A3D39]">
+              Edit Scene {selectedScene?.sequence}
+            </DialogTitle>
+            <DialogDescription className="text-[11px] text-[#a0908b] font-sans uppercase tracking-wider">
+              Modify the raw source text for this scene. Changes will affect
+              future translation runs.
             </DialogDescription>
           </DialogHeader>
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 p-6 overflow-hidden flex flex-col gap-4">
             <textarea
-              value={editActText}
-              onChange={(e) => setEditActText(e.target.value)}
-              className="w-full h-full p-4 resize-none outline-none border border-[#d8cdbd] rounded font-serif text-[14px] leading-relaxed focus:border-blue-500"
-              placeholder="Enter or edit the act text..."
+              value={editSceneText}
+              onChange={(e) => setEditSceneText(e.target.value)}
+              className="flex-1 w-full p-6 resize-none outline-none border border-[#d8cdbd]/50 bg-white font-serif text-[15px] leading-relaxed text-[#4A3D39] shadow-inner"
+              placeholder="Enter scene source text..."
             />
-            <div className="mt-2 text-[12px] text-gray-600">
-              Word count: {editActText.trim().split(/\s+/).length} / ~2500
-            </div>
           </div>
-          <DialogFooter>
+          <DialogFooter className="p-4 bg-[#f2eadc]/20 border-t border-[#d8cdbd] gap-2">
             <Button
               variant="outline"
-              onClick={handleEditActCancel}
-              disabled={isActMetadataLoading}
+              onClick={handleEditSceneCancel}
+              disabled={isSceneSaving}
+              className="h-9 text-[10px] tracking-widest border-[#d8cdbd] text-[#807068] hover:bg-[#f2eadc] font-sans uppercase px-6"
             >
               Cancel
             </Button>
             <Button
-              onClick={() => void handleEditActSave()}
-              disabled={isActMetadataLoading || !editActText.trim()}
-              className="bg-blue-600 hover:bg-blue-700 text-white"
+              onClick={() => void handleEditSceneSave()}
+              disabled={isSceneSaving || !editSceneText.trim()}
+              className="h-9 text-[10px] tracking-widest bg-[#8B2626] hover:bg-[#701c1c] border-none text-white font-sans uppercase px-8 rounded-sm shadow-sm"
             >
-              {isActMetadataLoading ? "Saving..." : "Save"}
+              {isSceneSaving ? "SAVING..." : "SAVE CHANGES"}
             </Button>
           </DialogFooter>
         </DialogContent>

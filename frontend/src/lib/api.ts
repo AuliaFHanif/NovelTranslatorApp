@@ -905,3 +905,75 @@ export async function deleteAIModel(id: number): Promise<void> {
     method: "DELETE",
   });
 }
+
+/**
+ * SCENE-BASED API FUNCTIONS
+ */
+
+import type { Scene } from "../types/scene";
+
+export async function getScenes(chapterId: number): Promise<Scene[]> {
+  const result = await requestJson<ApiListResponse<Scene>>(`/scenes/chapters/${chapterId}`);
+  return result.data;
+}
+
+export async function runSceneSegmentation(chapterId: number, options?: { language?: string; model?: string }): Promise<{ success: boolean; scenesCreated: number; data: Scene[] }> {
+  return await requestJson<any>(`/scenes/chapters/${chapterId}/segment`, {
+    method: "POST",
+    body: JSON.stringify(options || {}),
+  });
+}
+
+export async function translateScene(sceneId: number, options?: { model?: string }): Promise<{ success: boolean; data: { scene: Scene; translation: string } }> {
+  return await requestJson<any>(`/scenes/${sceneId}/translate`, {
+    method: "POST",
+    body: JSON.stringify(options || {}),
+  });
+}
+
+export async function polishScene(sceneId: number, options?: { model?: string }): Promise<{ success: boolean; data: { scene: Scene; edits: any[]; finalText: string } }> {
+  return await requestJson<any>(`/scenes/${sceneId}/polish`, {
+    method: "POST",
+    body: JSON.stringify(options || {}),
+  });
+}
+
+export async function updateSceneRawText(sceneId: number, rawText: string): Promise<{ success: boolean; split: boolean; data: Scene | Scene[] }> {
+  return await requestJson<any>(`/scenes/${sceneId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ rawText }),
+  });
+}
+
+export async function deleteScene(sceneId: number): Promise<{ success: boolean; deleted: boolean; renumbered: boolean }> {
+  return await requestJson<any>(`/scenes/${sceneId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function deleteAllScenes(chapterId: number): Promise<{ success: boolean; deletedCount: number }> {
+  return await requestJson<any>(`/scenes/chapters/${chapterId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function extractSceneTerms(sceneId: number, options?: { model?: string }): Promise<{ success: boolean; terms: any[]; sceneId: number }> {
+  return await requestJson<any>(`/scenes/${sceneId}/extract-terms`, {
+    method: "POST",
+    body: JSON.stringify(options || {}),
+  });
+}
+
+export async function analyzeScene(sceneId: number, options?: { model?: string }): Promise<{ success: boolean; data: any }> {
+  return await requestJson<any>(`/scenes/${sceneId}/analyze`, {
+    method: "POST",
+    body: JSON.stringify(options || {}),
+  });
+}
+
+export async function bulkApproveTermsToScene(seriesId: number, language: string, terms: any[]): Promise<{ success: boolean; count: number }> {
+  return await requestJson<any>(`/scenes/bulk-approve-terms`, {
+    method: "POST",
+    body: JSON.stringify({ seriesId, language, terms }),
+  });
+}

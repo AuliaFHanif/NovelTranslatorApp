@@ -543,7 +543,7 @@ export function Settings() {
                 }
                 className="w-full border border-[#d8cdbd] rounded-sm bg-transparent focus-visible:ring-1 focus-visible:ring-[#8b2626] font-serif text-[#4A3D39] px-3 py-2 h-10"
               >
-                <option value="lm-studio">LM Studio</option>
+                <option value="lm-studio">Ollama / LM Studio</option>
                 <option value="openai">OpenAI</option>
                 <option value="claude">Claude</option>
                 <option value="other">Other</option>

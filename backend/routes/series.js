@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { Series } = require("../models");
+const { Series, GlossaryTerm } = require("../models");
 
 /**
  * GET /api/series
@@ -142,6 +142,34 @@ router.patch("/:id", async (req, res) => {
     });
   } catch (error) {
     console.error("PATCH /api/series/:id - Error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/series/:id/glossary/detailed
+ * Get all glossary terms for a series
+ */
+router.get("/:id/glossary/detailed", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const series = await Series.findByPk(id);
+    if (!series) {
+      return res.status(404).json({ error: `Series ${id} not found` });
+    }
+
+    const terms = await GlossaryTerm.findAll({
+      where: { seriesId: id },
+      order: [["createdAt", "DESC"]],
+    });
+
+    res.status(200).json(terms);
+  } catch (error) {
+    console.error(
+      "GET /api/series/:id/glossary/detailed - Error:",
+      error.message,
+    );
     res.status(500).json({ error: error.message });
   }
 });

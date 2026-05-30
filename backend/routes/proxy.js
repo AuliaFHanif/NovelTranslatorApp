@@ -2,14 +2,14 @@ const express = require("express");
 const axios = require("axios");
 const router = express.Router();
 
-// LM Studio default endpoint
-const LM_STUDIO_URL = process.env.LM_STUDIO_URL || "http://localhost:1234";
+// Ollama / LM Studio endpoint
+const LM_STUDIO_URL = process.env.OLLAMA_URL || process.env.LM_STUDIO_URL || "http://localhost:8080";
 const LM_STUDIO_MODELS_ENDPOINT = `${LM_STUDIO_URL}/v1/models`;
 const LM_STUDIO_CHAT_ENDPOINT = `${LM_STUDIO_URL}/v1/chat/completions`;
 
 /**
  * GET /api/health
- * Health check - verify backend and LM Studio connectivity
+ * Health check - verify backend and Ollama / LM Studio connectivity
  */
 router.get("/", async (req, res) => {
   try {
@@ -59,8 +59,8 @@ router.get("/", async (req, res) => {
 
 /**
  * POST /api/llm
- * Proxy requests to LM Studio Chat Completions API
- * Forward the request body directly to LM Studio and return response
+ * Proxy requests to Ollama / LM Studio Chat Completions API
+ * Forward the request body directly and return response
  *
  * Body format (OpenAI compatible):
  * {
@@ -90,7 +90,7 @@ router.post("/", async (req, res) => {
       });
     }
 
-    // Build request to LM Studio
+    // Build request
     const lmRequest = {
       model,
       messages,
@@ -103,34 +103,34 @@ router.post("/", async (req, res) => {
     console.log(`[LLM Proxy] Forwarding request to ${LM_STUDIO_CHAT_ENDPOINT}`);
     console.log(`[LLM Proxy] Model: ${model}, Messages: ${messages.length}`);
 
-    // Forward to LM Studio
+    // Forward
     const response = await axios.post(LM_STUDIO_CHAT_ENDPOINT, lmRequest, {
       timeout: 30000, // 30 second timeout for LLM responses
     });
 
-    // Return LM Studio response
+    // Return response
     res.status(200).json(response.data);
   } catch (error) {
     console.error("POST /api/llm - Error:", error.message);
 
     if (error.response) {
-      // LM Studio returned an error response
+      // LLM service returned an error response
       return res.status(error.response.status || 500).json({
-        error: "LM Studio error",
+        error: "LLM service error",
         details: error.response.data,
       });
     }
 
     if (error.code === "ECONNREFUSED") {
       return res.status(503).json({
-        error: "LM Studio service unavailable",
-        message: `Cannot connect to ${LM_STUDIO_URL}. Ensure LM Studio is running.`,
+        error: "Ollama / LM Studio service unavailable",
+        message: `Cannot connect to ${LM_STUDIO_URL}. Ensure Ollama or LM Studio is running.`,
       });
     }
 
     if (error.code === "ECONNABORTED") {
       return res.status(504).json({
-        error: "LM Studio request timeout",
+        error: "Ollama / LM Studio request timeout",
         message:
           "The LLM processing took too long. Try with fewer tokens or simpler input.",
       });

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Dialog,
@@ -10,7 +10,7 @@ import {
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import type { GlossaryCandidate, ConflictedTerm } from "../lib/api";
-import { bulkApproveTerms } from "../lib/api";
+import { bulkApproveTermsToScene } from "../lib/api";
 import { showSuccess, showError } from "../lib/notifications";
 import { TermConflictDialog } from "./TermConflictDialog";
 
@@ -19,6 +19,7 @@ interface GlossaryApprovalDialogProps {
   onOpenChange: (open: boolean) => void;
   terms: GlossaryCandidate[];
   onApproved?: () => void;
+  language?: string;
 }
 
 interface CategoryizedTerms {
@@ -32,6 +33,7 @@ export function GlossaryApprovalDialog({
   onOpenChange,
   terms,
   onApproved,
+  language = "zh",
 }: GlossaryApprovalDialogProps) {
   const [searchParams] = useSearchParams();
   const seriesId = Number(searchParams.get("seriesId") || "0");
@@ -45,6 +47,22 @@ export function GlossaryApprovalDialog({
     existingTerms: [],
     conflictTerms: [],
   });
+  const allowCloseRef = useRef(false);
+
+  const handleOpenChange = (open: boolean) => {
+    // Only allow closing if it's an explicit button action
+    if (!open && !allowCloseRef.current) {
+      return;
+    }
+    // Reset the flag after use
+    allowCloseRef.current = false;
+    onOpenChange(open);
+  };
+
+  const closeDialog = () => {
+    allowCloseRef.current = true;
+    onOpenChange(false);
+  };
 
   // Helper to get unique key for a candidate
   const getCandidateKey = (cand: GlossaryCandidate | ConflictedTerm) =>
@@ -53,14 +71,25 @@ export function GlossaryApprovalDialog({
   useEffect(() => {
     if (isOpen && terms.length > 0) {
       // Initially just treat all as new terms until we submit
+      // Normalize term structure: backend returns context as top-level field
+      const normalizedTerms = terms.map((t: any) => ({
+        ...t,
+        // Ensure appearances array exists for consistent access patterns
+        appearances:
+          t.appearances ||
+          (t.context
+            ? [{ context: t.context, confidence: t.confidence || 0.8 }]
+            : []),
+      }));
+
       setCategorized({
-        newTerms: terms,
+        newTerms: normalizedTerms,
         existingTerms: [],
         conflictTerms: [],
       });
-      setSelectedKeys(new Set(terms.map(getCandidateKey)));
+      setSelectedKeys(new Set(normalizedTerms.map(getCandidateKey)));
       const initialEdits: Record<string, string> = {};
-      terms.forEach((t) => {
+      normalizedTerms.forEach((t: any) => {
         initialEdits[getCandidateKey(t)] = t.proposedTranslation || "";
       });
       setEditValues(initialEdits);
@@ -87,28 +116,29 @@ export function GlossaryApprovalDialog({
       const selectedTerms = allTerms
         .filter((t) => selectedKeys.has(getCandidateKey(t)))
         .map((t) => ({
-          ...t,
-          termEn: editValues[getCandidateKey(t)],
+          term: t.term,
+          type: t.type,
+          proposedTranslation:
+            editValues[getCandidateKey(t)] || t.proposedTranslation || "",
+          definition: (t as any).definition || (t as any).context || "",
+          confidence: t.confidence,
         }));
 
-      const result = await bulkApproveTerms(seriesId, selectedTerms);
+      const result = await bulkApproveTermsToScene(
+        seriesId,
+        language,
+        selectedTerms,
+      );
 
       // Check if there are conflicts to resolve
-      if (
-        result.categorized?.conflictTerms &&
-        result.categorized.conflictTerms.length > 0
-      ) {
-        setCategorized(result.categorized);
-        setShowConflictDialog(true);
-      } else {
-        const totalSaved = result.created + result.updated;
-        void showSuccess(
-          "Glossary Updated",
-          `Successfully added ${totalSaved} terms to the library.`,
-        );
-        if (onApproved) onApproved();
-        onOpenChange(false);
-      }
+      // (Simplified for now, assuming direct success)
+      const totalSaved = result.count;
+      void showSuccess(
+        "Glossary Updated",
+        `Successfully added ${totalSaved} terms to the library.`,
+      );
+      if (onApproved) onApproved();
+      closeDialog();
     } catch (error) {
       void showError(
         "Approval Failed",
@@ -126,7 +156,7 @@ export function GlossaryApprovalDialog({
     // Just confirm completion and close dialogs
     setShowConflictDialog(false);
     if (onApproved) onApproved();
-    onOpenChange(false);
+    closeDialog();
   };
 
   const TermSection = ({
@@ -181,8 +211,9 @@ export function GlossaryApprovalDialog({
                     {term.term}
                   </span>
                   <span className="text-[#a0908b] text-[11px] leading-snug italic line-clamp-3">
-                    {term.appearances?.[0]?.context ||
-                      "No specific context sample extracted."}
+                    {(term as any).context ||
+                      term.appearances?.[0]?.context ||
+                      "No context available."}
                   </span>
                 </div>
                 <div className="flex-1">
@@ -240,7 +271,10 @@ export function GlossaryApprovalDialog({
 
   return (
     <>
-      <Dialog open={isOpen && !showConflictDialog} onOpenChange={onOpenChange}>
+      <Dialog
+        open={isOpen && !showConflictDialog}
+        onOpenChange={handleOpenChange}
+      >
         <DialogContent className="sm:max-w-[700px] max-h-[85vh] flex flex-col p-0 overflow-hidden bg-[#FBF9F6] border-[#d8cdbd] rounded-sm">
           <DialogHeader className="p-6 bg-[#f2eadc]/40 border-b border-[#d8cdbd]">
             <DialogTitle className="text-2xl font-serif text-[#4A3D39] tracking-tight">
@@ -284,7 +318,7 @@ export function GlossaryApprovalDialog({
             <div className="flex gap-3">
               <Button
                 variant="outline"
-                onClick={() => onOpenChange(false)}
+                onClick={() => closeDialog()}
                 className="h-10 px-8 text-[10px] tracking-[0.2em] font-sans uppercase rounded-sm border-[#d8cdbd] text-[#a0908b] hover:bg-[#f2eadc]/40 hover:text-[#4A3D39]"
               >
                 Discard All

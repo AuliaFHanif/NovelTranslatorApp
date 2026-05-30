@@ -11,17 +11,10 @@ module.exports = (sequelize, DataTypes) => {
         });
       }
 
-      if (models.Act) {
-        TermAppearance.belongsTo(models.Act, { 
-          foreignKey: 'actId',
-          as: 'Act'
-        });
-      }
-
-      if (models.SubAct) {
-        TermAppearance.belongsTo(models.SubAct, { 
-          foreignKey: 'subActId',
-          as: 'SubAct'
+      if (models.Scene) {
+        TermAppearance.belongsTo(models.Scene, { 
+          foreignKey: 'sceneId',
+          as: 'Scene'
         });
       }
     }
@@ -37,20 +30,11 @@ module.exports = (sequelize, DataTypes) => {
       },
       onDelete: 'CASCADE'
     },
-    actId: {
+    sceneId: {
       type: DataTypes.INTEGER,
-      allowNull: true,
+      allowNull: false,
       references: {
-        model: 'Acts',
-        key: 'id'
-      },
-      onDelete: 'CASCADE'
-    },
-    subActId: {
-      type: DataTypes.INTEGER,
-      allowNull: true,
-      references: {
-        model: 'SubActs',
+        model: 'Scenes',
         key: 'id'
       },
       onDelete: 'CASCADE'
@@ -72,18 +56,10 @@ module.exports = (sequelize, DataTypes) => {
     modelName: 'TermAppearance',
     tableName: 'TermAppearances',
     timestamps: true,
-    validate: {
-      eitherActOrSubAct() {
-        if (!this.actId && !this.subActId) {
-          throw new Error('Either actId or subActId must be set');
-        }
-      }
-    },
     indexes: [
-      { unique: true, fields: ['termId', 'actId', 'subActId'] },
+      { unique: true, fields: ['termId', 'sceneId'] },
       { fields: ['termId'] },
-      { fields: ['actId'] },
-      { fields: ['subActId'] }
+      { fields: ['sceneId'] }
     ]
   });
 

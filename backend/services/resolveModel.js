@@ -1,15 +1,15 @@
 const axios = require('axios');
 const { AIModel } = require('../models');
 
-const LM_STUDIO_URL = (process.env.LM_STUDIO_URL || 'http://localhost:1234').replace(/\/+$/, '');
+const LM_STUDIO_URL = (process.env.OLLAMA_URL || process.env.LM_STUDIO_URL || 'http://localhost:8080').replace(/\/+$/, '');
 
 /**
- * Resolve the model ID to use for LM Studio requests.
+ * Resolve the model ID to use for LM Studio / Ollama requests.
  *
  * Priority:
  *   1. Explicit `model` passed in (from request body / caller)
  *   2. First active AIModel in the database
- *   3. First model currently loaded in LM Studio (GET /v1/models)
+ *   3. First model currently loaded in Ollama / LM Studio (GET /v1/models)
  *
  * Throws if no model can be resolved at all.
  */
@@ -32,7 +32,7 @@ async function resolveModel(explicitModel) {
     console.warn('[resolveModel] Could not query AIModel table:', err.message);
   }
 
-  // 3. Ask LM Studio what's loaded
+  // 3. Ask Ollama / LM Studio what's loaded
   try {
     const response = await axios.get(`${LM_STUDIO_URL}/v1/models`, { timeout: 3000 });
     const models = response.data?.data;
@@ -40,12 +40,12 @@ async function resolveModel(explicitModel) {
       return models[0].id;
     }
   } catch (err) {
-    console.warn('[resolveModel] Could not query LM Studio /v1/models:', err.message);
+    console.warn('[resolveModel] Could not query Ollama / LM Studio /v1/models:', err.message);
   }
 
   throw new Error(
     'No model available. Please configure a model in Settings → AI Models, ' +
-    'or ensure a model is loaded in LM Studio.'
+    'or ensure a model is loaded in Ollama / LM Studio.'
   );
 }
 
